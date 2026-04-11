@@ -12,7 +12,7 @@ import {
   getUser,
   graphRequest,
   listMyMessages,
-  loadJsonInput as loadGraphJsonInput
+  loadRequestInput
 } from "./graph-api.js";
 import {
   createFlow,
@@ -46,7 +46,7 @@ Usage:
   graph-api me drive
   graph-api me messages [--limit 10]
   graph-api users get --id <user-id-or-upn>
-  graph-api request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input file.json]
+  graph-api request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input file.json | --input-raw file]
   graph-api power-automate auth login --environment-url <url> [--client-id <id>] [--client-secret <secret>] [--tenant <tenant>] [--redirect-uri ${graphDefaults.redirectUri}] [--scopes "<space-delimited scopes>"]
   graph-api power-automate auth status
   graph-api power-automate auth refresh
@@ -64,6 +64,7 @@ Examples:
   graph-api auth login --client-id <app-client-id>
   graph-api me
   graph-api request GET /me
+  graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./notes.md
   graph-api power-automate auth login --client-id <app-client-id> --environment-url https://contoso.crm.dynamics.com
   graph-api power-automate flows list --state on
   graph-api power-automate request GET /workflows --query '$top=5'
@@ -265,11 +266,12 @@ async function handleRequest(args, flags) {
     throw new Error("Usage: graph-api request <method> <path>");
   }
 
+  const requestInput = loadRequestInput(flags);
   const result = await graphRequest({
     method,
     pathname,
     query: normalizeList(flags.query),
-    body: loadGraphJsonInput(flags)
+    ...requestInput
   });
 
   printJson(result);
