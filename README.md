@@ -123,6 +123,7 @@ graph-api users get --id user@contoso.com
 graph-api request GET /me
 graph-api request GET /me/events --query '$top=5'
 graph-api request PATCH /me --data-json '{"city":"Chicago"}'
+graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./notes.md
 ```
 
 ### Power Automate
@@ -175,6 +176,12 @@ Run a raw Dataverse Web API request against workflows:
 
 ```bash
 graph-api power-automate request GET /workflows --query '$select=name,workflowid,statecode' --query '$top=5'
+```
+
+Upload a markdown file into OneDrive:
+
+```bash
+graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./notes.md
 ```
 
 ## Notes
