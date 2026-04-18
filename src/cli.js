@@ -15,19 +15,61 @@ import {
   loadRequestInput
 } from "./graph-api.js";
 import {
+  bindConnectionReference,
+  capabilityReport,
+  createTemplateBackedFlow,
   createFlow,
   deleteFlow,
+  diagnoseFlow,
+  getTemplate,
+  listFlowActions,
+  listFlowDependencies,
+  listFlowTriggers,
+  addFlowToSolution,
+  diffFlow,
+  exportFlow,
+  getConnection,
+  getConnectionReference,
+  getEnvironment,
   getFlow,
+  getRun,
+  getSolution,
+  listConnectionReferences,
+  listConnections,
   listFlows,
+  listEnvironments,
+  listRuns,
+  listSolutionFlows,
+  listSolutions,
+  listIntentQuestions,
+  listTemplates,
+  importFlow,
+  instantiateTemplatePayload,
   loadJsonInput as loadPowerAutomateJsonInput,
+  planIntent,
+  preflightFlowPayload,
   powerAutomateRequest,
+  resolveActiveEnvironment,
+  resolveEnvironmentByUrl,
   resolvePowerAutomateSettings,
+  scaffoldIntent,
+  selectEnvironment,
   setFlowState,
-  updateFlow
+  updateFlow,
+  validateFlowPayload,
+  whoAmI
 } from "./power-automate.js";
 
 function printJson(value) {
   console.log(JSON.stringify(value, null, 2));
+}
+
+function parseJsonFlag(value, label) {
+  try {
+    return JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON for ${label}: ${error.message}`);
+  }
 }
 
 function printHelp() {
@@ -51,14 +93,49 @@ Usage:
   graph-api power-automate auth status
   graph-api power-automate auth refresh
   graph-api power-automate auth logout
-  graph-api power-automate flows list [--top 10] [--state on|off|suspended|all]
-  graph-api power-automate flows get --id <workflow-id>
-  graph-api power-automate flows create [--data-json '{"name":"..."}' | --input flow.json]
-  graph-api power-automate flows update --id <workflow-id> [--data-json '{"description":"..."}' | --input patch.json]
-  graph-api power-automate flows delete --id <workflow-id>
-  graph-api power-automate flows on --id <workflow-id>
-  graph-api power-automate flows off --id <workflow-id>
-  graph-api power-automate request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input body.json]
+  graph-api power-automate whoami [--environment <id|url>]
+  graph-api power-automate capability-report [--environment <id|url>]
+  graph-api power-automate plan "<intent>"
+  graph-api power-automate questions --intent "<intent>"
+  graph-api power-automate scaffold --intent-json '{...}' [--apply] [--output flow.json] [--environment <id|url>]
+  graph-api power-automate templates list
+  graph-api power-automate templates show --id <template-id>
+  graph-api power-automate templates instantiate --id <template-id> [--params-json '{"name":"..."}'] [--output flow.json]
+  graph-api power-automate connections list [--environment <id|url>]
+  graph-api power-automate connections get --id <connection-id> [--environment <id|url>]
+  graph-api power-automate connection-references list [--environment <id|url>]
+  graph-api power-automate connection-references get --id <reference-id> [--environment <id|url>]
+  graph-api power-automate connection-references bind --id <reference-id> --connection-id <connection-id> [--environment <id|url>]
+  graph-api power-automate validate --input flow.json [--environment <id|url>]
+  graph-api power-automate preflight --input flow.json [--environment <id|url>]
+  graph-api power-automate environments list
+  graph-api power-automate environments get --id <environment-id>
+  graph-api power-automate environments resolve --url <environment-url>
+  graph-api power-automate environments select --id <environment-id>
+  graph-api power-automate solutions list [--environment <id|url>]
+  graph-api power-automate solutions get --id <solution-id> [--environment <id|url>]
+  graph-api power-automate solutions flows list --solution-id <solution-id> [--environment <id|url>]
+  graph-api power-automate solutions add-flow --solution-id <solution-id> --flow-id <flow-id> [--environment <id|url>]
+  graph-api power-automate runs list --flow-id <workflow-id> [--top 20] [--environment <id|url>]
+  graph-api power-automate runs get --id <run-id> [--environment <id|url>]
+  graph-api power-automate flows list [--top 10] [--state on|off|suspended|all] [--environment <id|url>]
+  graph-api power-automate flows get --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows doctor --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows triggers list --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows actions list --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows dependencies --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows export --id <workflow-id> [--output flow.json] [--environment <id|url>]
+  graph-api power-automate flows import --input flow.json [--id <workflow-id>] [--apply] [--environment <id|url>]
+  graph-api power-automate flows diff --id <workflow-id> --input flow.json [--environment <id|url>]
+  graph-api power-automate flows create-scheduled --name <name> --schedule "0 9 * * *" [--message <text>] [--apply] [--output flow.json] [--environment <id|url>]
+  graph-api power-automate flows create-teams-alert --name <name> --channel <channel-id> [--summary <text>] [--apply] [--output flow.json] [--environment <id|url>]
+  graph-api power-automate flows create-approval --name <name> --approver <email> [--title <title>] [--details <text>] [--apply] [--output flow.json] [--environment <id|url>]
+  graph-api power-automate flows create [--data-json '{"name":"..."}' | --input flow.json] [--environment <id|url>]
+  graph-api power-automate flows update --id <workflow-id> [--data-json '{"description":"..."}' | --input patch.json] [--environment <id|url>]
+  graph-api power-automate flows delete --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows on --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate flows off --id <workflow-id> [--environment <id|url>]
+  graph-api power-automate request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input body.json] [--environment <id|url>]
 
 Examples:
   graph-api auth login --client-id <app-client-id>
@@ -66,11 +143,39 @@ Examples:
   graph-api request GET /me
   graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./notes.md
   graph-api power-automate auth login --client-id <app-client-id> --environment-url https://contoso.crm.dynamics.com
+  graph-api power-automate whoami
+  graph-api power-automate capability-report
+  graph-api power-automate plan "When I get an email from a VIP sender, post it to Teams"
+  graph-api power-automate questions --intent "Create a daily approval flow"
+  graph-api power-automate templates list
+  graph-api power-automate scaffold --intent-json '{"intent":"Create a daily approval flow","draftTemplate":"approval"}'
+  graph-api power-automate templates instantiate --id scheduled-basic --params-json '{"name":"Daily digest"}'
+  graph-api power-automate environments list
+  graph-api power-automate environments select --id Default-123456
+  graph-api power-automate connections list
+  graph-api power-automate connection-references list
+  graph-api power-automate validate --input ./flow-create.json
+  graph-api power-automate preflight --input ./flow-create.json --environment Default-123456
+  graph-api power-automate solutions list
+  graph-api power-automate solutions flows list --solution-id 00000000-0000-0000-0000-000000000000
+  graph-api power-automate runs list --flow-id 00000000-0000-0000-0000-000000000000
+  graph-api power-automate flows doctor --id 00000000-0000-0000-0000-000000000000
+  graph-api power-automate flows triggers list --id 00000000-0000-0000-0000-000000000000
+  graph-api power-automate flows actions list --id 00000000-0000-0000-0000-000000000000
+  graph-api power-automate flows dependencies --id 00000000-0000-0000-0000-000000000000
+  graph-api power-automate flows export --id 00000000-0000-0000-0000-000000000000 --output ./flow.json
+  graph-api power-automate flows diff --id 00000000-0000-0000-0000-000000000000 --input ./flow.json
+  graph-api power-automate flows import --input ./flow.json --apply
+  graph-api power-automate flows create-scheduled --name "Daily digest" --schedule "0 9 * * *"
+  graph-api power-automate flows create-teams-alert --name "Ops alert" --channel <channel-id>
+  graph-api power-automate flows create-approval --name "Review request" --approver approver@contoso.com
   graph-api power-automate flows list --state on
-  graph-api power-automate request GET /workflows --query '$top=5'
+  graph-api power-automate flows list --environment https://contoso.crm.dynamics.com
+  graph-api power-automate request GET /workflows --query '$top=5' --environment Default-123456
 
 Notes:
   - Power Automate flow management uses the Dataverse Web API, not the unsupported api.flow.microsoft.com endpoint
+  - environment discovery uses the Power Platform API and flow operations use the selected environment unless you override it with --environment or --environment-url
   - Power Automate commands currently target solution-aware cloud flows stored in Dataverse (the same scope covered by Microsoft Learn's "Work with cloud flows using code" article)
   - pass your Dataverse environment URL as --environment-url, for example https://contoso.crm.dynamics.com
   - default Power Automate login scopes are computed from the environment URL and request <environment-url>/user_impersonation
@@ -279,13 +384,15 @@ async function handleRequest(args, flags) {
 
 async function handlePowerAutomateFlows(args, flags) {
   const subcommand = args[0];
+  const environment = flags.environment || flags["environment-url"] || null;
 
   if (subcommand === "list") {
     printJson(
       await listFlows({
         top: flags.top || 10,
         state: flags.state || "all",
-        query: normalizeList(flags.query)
+        query: normalizeList(flags.query),
+        environment
       })
     );
     return;
@@ -293,7 +400,156 @@ async function handlePowerAutomateFlows(args, flags) {
 
   if (subcommand === "get") {
     const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await getFlow(id, normalizeList(flags.query)));
+    printJson(await getFlow(id, normalizeList(flags.query), { environment }));
+    return;
+  }
+
+  if (subcommand === "doctor") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(await diagnoseFlow(id, { query: normalizeList(flags.query), environment }));
+    return;
+  }
+
+  if (subcommand === "triggers") {
+    const nested = args[1];
+
+    if (nested === "list") {
+      printJson(
+        await listFlowTriggers(requireFlag(flags, "id", "Provide the workflow id with --id"), {
+          query: normalizeList(flags.query),
+          environment
+        })
+      );
+      return;
+    }
+
+    throw new Error(`Unknown power-automate flows triggers command "${nested}"`);
+  }
+
+  if (subcommand === "actions") {
+    const nested = args[1];
+
+    if (nested === "list") {
+      printJson(
+        await listFlowActions(requireFlag(flags, "id", "Provide the workflow id with --id"), {
+          query: normalizeList(flags.query),
+          environment
+        })
+      );
+      return;
+    }
+
+    throw new Error(`Unknown power-automate flows actions command "${nested}"`);
+  }
+
+  if (subcommand === "dependencies") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(await listFlowDependencies(id, { query: normalizeList(flags.query), environment }));
+    return;
+  }
+
+  if (subcommand === "export") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(
+      await exportFlow(id, {
+        query: normalizeList(flags.query),
+        environment,
+        output: flags.output || null
+      })
+    );
+    return;
+  }
+
+  if (subcommand === "diff") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    const body = loadPowerAutomateJsonInput(flags);
+
+    if (body === undefined) {
+      throw new Error("Provide --data-json or --input with the workflow payload.");
+    }
+
+    printJson(await diffFlow(id, body, { environment }));
+    return;
+  }
+
+  if (subcommand === "import") {
+    const body = loadPowerAutomateJsonInput(flags);
+
+    if (body === undefined) {
+      throw new Error("Provide --data-json or --input with the workflow payload.");
+    }
+
+    printJson(
+      await importFlow(body, {
+        id: flags.id || null,
+        apply: Boolean(flags.apply),
+        environment
+      })
+    );
+    return;
+  }
+
+  if (subcommand === "create-scheduled") {
+    printJson(
+      await createTemplateBackedFlow(
+        "scheduled-basic",
+        {
+          name: requireFlag(flags, "name", "Provide the flow name with --name"),
+          schedule: requireFlag(flags, "schedule", "Provide the schedule with --schedule"),
+          message: flags.message || null,
+          description: flags.description || null
+        },
+        {
+          apply: Boolean(flags.apply),
+          environment,
+          output: flags.output || null
+        }
+      )
+    );
+    return;
+  }
+
+  if (subcommand === "create-teams-alert") {
+    printJson(
+      await createTemplateBackedFlow(
+        "teams-alert",
+        {
+          name: requireFlag(flags, "name", "Provide the flow name with --name"),
+          channel: requireFlag(flags, "channel", "Provide the Teams channel id with --channel"),
+          summary: flags.summary || null,
+          description: flags.description || null,
+          schedule: flags.schedule || null,
+          teamId: flags["team-id"] || null
+        },
+        {
+          apply: Boolean(flags.apply),
+          environment,
+          output: flags.output || null
+        }
+      )
+    );
+    return;
+  }
+
+  if (subcommand === "create-approval") {
+    printJson(
+      await createTemplateBackedFlow(
+        "approval",
+        {
+          name: requireFlag(flags, "name", "Provide the flow name with --name"),
+          approver: requireFlag(flags, "approver", "Provide the approver with --approver"),
+          title: flags.title || null,
+          details: flags.details || null,
+          description: flags.description || null,
+          schedule: flags.schedule || null
+        },
+        {
+          apply: Boolean(flags.apply),
+          environment,
+          output: flags.output || null
+        }
+      )
+    );
     return;
   }
 
@@ -304,7 +560,7 @@ async function handlePowerAutomateFlows(args, flags) {
       throw new Error("Provide --data-json or --input with the workflow payload.");
     }
 
-    printJson(await createFlow(body));
+    printJson(await createFlow(body, { environment }));
     return;
   }
 
@@ -316,25 +572,25 @@ async function handlePowerAutomateFlows(args, flags) {
       throw new Error("Provide --data-json or --input with the update payload.");
     }
 
-    printJson(await updateFlow(id, body));
+    printJson(await updateFlow(id, body, { environment }));
     return;
   }
 
   if (subcommand === "delete") {
     const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await deleteFlow(id));
+    printJson(await deleteFlow(id, { environment }));
     return;
   }
 
   if (subcommand === "on") {
     const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await setFlowState(id, 1));
+    printJson(await setFlowState(id, 1, { environment }));
     return;
   }
 
   if (subcommand === "off") {
     const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await setFlowState(id, 0));
+    printJson(await setFlowState(id, 0, { environment }));
     return;
   }
 
@@ -354,9 +610,269 @@ async function handlePowerAutomateRequest(args, flags) {
       method,
       pathname,
       query: normalizeList(flags.query),
-      body: loadPowerAutomateJsonInput(flags)
+      body: loadPowerAutomateJsonInput(flags),
+      environment: flags.environment || flags["environment-url"] || null
     })
   );
+}
+
+async function handlePowerAutomateEnvironments(args, flags) {
+  const subcommand = args[0];
+
+  if (subcommand === "list") {
+    printJson(await listEnvironments({ query: normalizeList(flags.query) }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    const id = requireFlag(flags, "id", "Provide the environment id with --id");
+    printJson(await getEnvironment(id, { query: normalizeList(flags.query) }));
+    return;
+  }
+
+  if (subcommand === "resolve") {
+    const url = requireFlag(flags, "url", "Provide the environment URL with --url");
+    const environment = await resolveEnvironmentByUrl(url, { query: normalizeList(flags.query) });
+    printJson({
+      ok: true,
+      service: "power-automate",
+      environmentId: environment.id,
+      environmentUrl: environment.environmentUrl,
+      timestamp: new Date().toISOString(),
+      item: environment
+    });
+    return;
+  }
+
+  if (subcommand === "select") {
+    let environment = null;
+
+    if (flags.id) {
+      environment = await resolveActiveEnvironment(flags.id);
+    } else if (flags.url) {
+      environment = await resolveEnvironmentByUrl(flags.url, { query: normalizeList(flags.query) });
+    } else {
+      throw new Error("Provide --id or --url to choose the default Power Automate environment.");
+    }
+
+    printJson(selectEnvironment(environment));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate environments command "${subcommand}"`);
+}
+
+async function handlePowerAutomateConnections(args, flags) {
+  const subcommand = args[0];
+  const environment = flags.environment || flags["environment-url"] || null;
+
+  if (subcommand === "list") {
+    printJson(await listConnections({ environment, query: normalizeList(flags.query) }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    const id = requireFlag(flags, "id", "Provide the connection id with --id");
+    printJson(await getConnection(id, { environment, query: normalizeList(flags.query) }));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate connections command "${subcommand}"`);
+}
+
+async function handlePowerAutomateConnectionReferences(args, flags) {
+  const subcommand = args[0];
+  const environment = flags.environment || flags["environment-url"] || null;
+
+  if (subcommand === "list") {
+    printJson(await listConnectionReferences({ environment, query: normalizeList(flags.query) }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    const id = requireFlag(flags, "id", "Provide the connection reference id with --id");
+    printJson(await getConnectionReference(id, { environment, query: normalizeList(flags.query) }));
+    return;
+  }
+
+  if (subcommand === "bind") {
+    const id = requireFlag(flags, "id", "Provide the connection reference id with --id");
+    const connectionId = requireFlag(
+      flags,
+      "connection-id",
+      "Provide the connection id with --connection-id"
+    );
+    printJson(await bindConnectionReference(id, connectionId, { environment }));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate connection-references command "${subcommand}"`);
+}
+
+async function handlePowerAutomateRuns(args, flags) {
+  const subcommand = args[0];
+  const environment = flags.environment || flags["environment-url"] || null;
+
+  if (subcommand === "list") {
+    printJson(
+      await listRuns({
+        flowId: requireFlag(flags, "flow-id", "Provide the workflow id with --flow-id"),
+        top: flags.top || 20,
+        query: normalizeList(flags.query),
+        environment
+      })
+    );
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(
+      await getRun(requireFlag(flags, "id", "Provide the run id with --id"), {
+        query: normalizeList(flags.query),
+        environment
+      })
+    );
+    return;
+  }
+
+  throw new Error(`Unknown power-automate runs command "${subcommand}"`);
+}
+
+async function handlePowerAutomateSolutions(args, flags) {
+  const subcommand = args[0];
+  const environment = flags.environment || flags["environment-url"] || null;
+
+  if (subcommand === "list") {
+    printJson(await listSolutions({ environment, query: normalizeList(flags.query) }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(
+      await getSolution(requireFlag(flags, "id", "Provide the solution id with --id"), {
+        environment,
+        query: normalizeList(flags.query)
+      })
+    );
+    return;
+  }
+
+  if (subcommand === "flows") {
+    const nested = args[1];
+
+    if (nested === "list") {
+      printJson(
+        await listSolutionFlows(
+          requireFlag(flags, "solution-id", "Provide the solution id with --solution-id"),
+          {
+            environment,
+            query: normalizeList(flags.query)
+          }
+        )
+      );
+      return;
+    }
+
+    throw new Error(`Unknown power-automate solutions flows command "${nested}"`);
+  }
+
+  if (subcommand === "add-flow") {
+    printJson(
+      await addFlowToSolution(
+        requireFlag(flags, "solution-id", "Provide the solution id with --solution-id"),
+        requireFlag(flags, "flow-id", "Provide the flow id with --flow-id"),
+        { environment }
+      )
+    );
+    return;
+  }
+
+  throw new Error(`Unknown power-automate solutions command "${subcommand}"`);
+}
+
+async function handlePowerAutomateValidation(subcommand, flags) {
+  const body = loadPowerAutomateJsonInput(flags);
+
+  if (body === undefined) {
+    throw new Error("Provide --data-json or --input with the workflow payload.");
+  }
+
+  const environment = flags.environment || flags["environment-url"] || null;
+
+  if (subcommand === "validate") {
+    printJson(await validateFlowPayload(body, { environment }));
+    return;
+  }
+
+  if (subcommand === "preflight") {
+    printJson(await preflightFlowPayload(body, { environment }));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate validation command "${subcommand}"`);
+}
+
+async function handlePowerAutomateIntent(subcommand, args, flags) {
+  const environment = flags.environment || flags["environment-url"] || null;
+
+  if (subcommand === "plan") {
+    const intent = args.join(" ").trim();
+
+    if (!intent) {
+      throw new Error('Usage: graph-api power-automate plan "<intent>"');
+    }
+
+    printJson(planIntent(intent));
+    return;
+  }
+
+  if (subcommand === "questions") {
+    const intent = requireFlag(flags, "intent", "Provide the intent text with --intent");
+    printJson(listIntentQuestions(intent));
+    return;
+  }
+
+  if (subcommand === "scaffold") {
+    const intentJson = requireFlag(flags, "intent-json", "Provide the intent JSON with --intent-json");
+    printJson(
+      await scaffoldIntent(parseJsonFlag(intentJson, "--intent-json"), {
+        apply: Boolean(flags.apply),
+        output: flags.output || null,
+        environment
+      })
+    );
+    return;
+  }
+
+  throw new Error(`Unknown power-automate intent command "${subcommand}"`);
+}
+
+async function handlePowerAutomateTemplates(args, flags) {
+  const subcommand = args[0];
+
+  if (subcommand === "list") {
+    printJson(listTemplates());
+    return;
+  }
+
+  if (subcommand === "show") {
+    printJson(getTemplate(requireFlag(flags, "id", "Provide the template id with --id")));
+    return;
+  }
+
+  if (subcommand === "instantiate") {
+    const params = flags["params-json"] ? parseJsonFlag(flags["params-json"], "--params-json") : {};
+    printJson(
+      instantiateTemplatePayload(
+        requireFlag(flags, "id", "Provide the template id with --id"),
+        params,
+        { output: flags.output || null }
+      )
+    );
+    return;
+  }
+
+  throw new Error(`Unknown power-automate templates command "${subcommand}"`);
 }
 
 async function handlePowerAutomate(args, flags) {
@@ -369,6 +885,58 @@ async function handlePowerAutomate(args, flags) {
 
   if (subcommand === "flows") {
     await handlePowerAutomateFlows(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "environments") {
+    await handlePowerAutomateEnvironments(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "connections") {
+    await handlePowerAutomateConnections(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "templates") {
+    await handlePowerAutomateTemplates(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "plan" || subcommand === "questions" || subcommand === "scaffold") {
+    await handlePowerAutomateIntent(subcommand, args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "connection-references") {
+    await handlePowerAutomateConnectionReferences(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "runs") {
+    await handlePowerAutomateRuns(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "solutions") {
+    await handlePowerAutomateSolutions(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "validate" || subcommand === "preflight") {
+    await handlePowerAutomateValidation(subcommand, flags);
+    return;
+  }
+
+  if (subcommand === "whoami") {
+    printJson(await whoAmI({ environment: flags.environment || flags["environment-url"] || null }));
+    return;
+  }
+
+  if (subcommand === "capability-report") {
+    printJson(
+      await capabilityReport({ environment: flags.environment || flags["environment-url"] || null })
+    );
     return;
   }
 

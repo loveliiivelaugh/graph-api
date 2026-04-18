@@ -359,6 +359,62 @@ export async function ensureValidAccessToken(config, options = {}) {
   return serviceConfig;
 }
 
+export async function getAccessTokenForScopes(config, options = {}) {
+  const serviceName = options.serviceName || "graph";
+  const serviceConfig = getServiceConfig(config, serviceName);
+  const scopes = options.scopes;
+
+  if (!scopes) {
+    return {
+      accessToken: (await ensureValidAccessToken(config, options)).accessToken,
+      serviceConfig
+    };
+  }
+
+  if (!serviceConfig.clientId || !serviceConfig.refreshToken) {
+    throw new Error(
+      `Missing client ID or refresh token for ${getServiceLabel(serviceName)}. Run \`graph-api ${serviceName === "graph" ? "auth" : "power-automate auth"} login\` again.`
+    );
+  }
+
+  if (serviceConfig.scopes === scopes) {
+    const validConfig = await ensureValidAccessToken(config, options);
+    return {
+      accessToken: validConfig.accessToken,
+      serviceConfig: validConfig
+    };
+  }
+
+  const token = await tokenRequest(serviceConfig.tenant || DEFAULT_TENANT, {
+    grant_type: "refresh_token",
+    client_id: serviceConfig.clientId,
+    ...(serviceConfig.clientSecret ? { client_secret: serviceConfig.clientSecret } : {}),
+    refresh_token: serviceConfig.refreshToken,
+    scope: scopes
+  });
+
+  const nextServiceConfig = {
+    ...serviceConfig,
+    refreshToken: token.refresh_token || serviceConfig.refreshToken,
+    idToken: token.id_token || serviceConfig.idToken || null,
+    tokenType: token.token_type || serviceConfig.tokenType || "Bearer",
+    refreshTokenExpiresAt: token.refresh_token_expires_in
+      ? buildTokenExpiry(token.refresh_token_expires_in)
+      : serviceConfig.refreshTokenExpiresAt || null,
+    user: buildUserClaims(
+      decodeJwtClaims(token.id_token || serviceConfig.idToken),
+      serviceConfig.user
+    )
+  };
+
+  saveConfig(setServiceConfig(config, serviceName, nextServiceConfig));
+
+  return {
+    accessToken: token.access_token,
+    serviceConfig: nextServiceConfig
+  };
+}
+
 export function logoutService(serviceName) {
   const config = loadConfig();
   const nextConfig = clearServiceConfig(config, serviceName);
