@@ -1,11 +1,18 @@
 import crypto from "node:crypto";
 import http from "node:http";
 import { URL } from "node:url";
-import { loadConfig, saveConfig } from "./config.js";
+import {
+  clearServiceConfig,
+  getServiceConfig,
+  deleteConfig,
+  loadConfig,
+  saveConfig,
+  setServiceConfig
+} from "./config.js";
 
 const DEFAULT_TENANT = "common";
-const DEFAULT_REDIRECT_URI = "http://127.0.0.1:8787/callback";
-const DEFAULT_SCOPES = "openid profile offline_access User.Read";
+const DEFAULT_REDIRECT_URI = "http://localhost:8787/callback";
+const GRAPH_DEFAULT_SCOPES = "openid profile offline_access User.Read";
 
 function randomState() {
   return crypto.randomBytes(24).toString("hex");
@@ -23,6 +30,43 @@ function buildTokenExpiry(expiresInSeconds) {
 
 function getAuthorityBase(tenant = DEFAULT_TENANT) {
   return `https://login.microsoftonline.com/${tenant}`;
+}
+
+function normalizeEnvironmentUrl(environmentUrl) {
+  if (!environmentUrl) {
+    return null;
+  }
+
+  const normalized = new URL(environmentUrl);
+  return normalized.origin;
+}
+
+function buildDataverseApiBaseUrl(environmentUrl, apiVersion = "v9.2") {
+  const normalizedEnvironmentUrl = normalizeEnvironmentUrl(environmentUrl);
+
+  if (!normalizedEnvironmentUrl) {
+    throw new Error(
+      "Power Automate requires --environment-url (or POWER_AUTOMATE_ENVIRONMENT_URL) set to your Dataverse environment URL."
+    );
+  }
+
+  return `${normalizedEnvironmentUrl}/api/data/${apiVersion}`;
+}
+
+function getDefaultScopes(serviceName, options = {}) {
+  if (serviceName === "powerAutomate") {
+    const normalizedEnvironmentUrl = normalizeEnvironmentUrl(options.environmentUrl);
+
+    if (!normalizedEnvironmentUrl) {
+      throw new Error(
+        "Power Automate login requires --environment-url so the CLI can request the Dataverse user_impersonation scope."
+      );
+    }
+
+    return `openid profile offline_access ${normalizedEnvironmentUrl}/user_impersonation`;
+  }
+
+  return GRAPH_DEFAULT_SCOPES;
 }
 
 async function tokenRequest(tenant, params) {
@@ -53,7 +97,7 @@ function waitForCallback({ redirectUri, expectedState, timeoutMs = 300000 }) {
     if (!["127.0.0.1", "localhost"].includes(redirectUrl.hostname)) {
       reject(
         new Error(
-          "Automatic login currently supports localhost redirect URIs only. Use --redirect-uri http://127.0.0.1:8787/callback."
+          "Automatic login currently supports localhost redirect URIs only. Use --redirect-uri http://localhost:8787/callback."
         )
       );
       return;
@@ -131,11 +175,60 @@ function decodeJwtClaims(token) {
   }
 }
 
-export function getDefaultAuthSettings() {
+function getServiceLabel(serviceName) {
+  return serviceName === "powerAutomate" ? "Power Automate" : "Microsoft Graph";
+}
+
+function buildUserClaims(tokenClaims, fallbackUser) {
+  if (!tokenClaims) {
+    return fallbackUser || null;
+  }
+
+  return {
+    tenantId: tokenClaims.tid || null,
+    userId: tokenClaims.oid || tokenClaims.sub || null,
+    username: tokenClaims.preferred_username || tokenClaims.upn || null,
+    name: tokenClaims.name || null
+  };
+}
+
+function buildStoredServiceConfig(serviceName, config, options, token, existingServiceConfig) {
+  const claims = decodeJwtClaims(token.id_token || existingServiceConfig.idToken);
+  const nextServiceConfig = {
+    ...existingServiceConfig,
+    tenant: options.tenant,
+    redirectUri: options.redirectUri,
+    scopes: options.scopes,
+    clientId: options.clientId,
+    clientSecret: options.clientSecret || existingServiceConfig.clientSecret || null,
+    accessToken: token.access_token,
+    refreshToken: token.refresh_token || existingServiceConfig.refreshToken,
+    idToken: token.id_token || existingServiceConfig.idToken || null,
+    tokenType: token.token_type || existingServiceConfig.tokenType || "Bearer",
+    accessTokenExpiresAt: buildTokenExpiry(token.expires_in),
+    refreshTokenExpiresAt: token.refresh_token_expires_in
+      ? buildTokenExpiry(token.refresh_token_expires_in)
+      : existingServiceConfig.refreshTokenExpiresAt || null,
+    user: buildUserClaims(claims, existingServiceConfig.user)
+  };
+
+  if (serviceName === "powerAutomate") {
+    nextServiceConfig.environmentUrl = normalizeEnvironmentUrl(options.environmentUrl);
+    nextServiceConfig.apiVersion = options.apiVersion || existingServiceConfig.apiVersion || "v9.2";
+    nextServiceConfig.apiBaseUrl = buildDataverseApiBaseUrl(
+      options.environmentUrl,
+      nextServiceConfig.apiVersion
+    );
+  }
+
+  return nextServiceConfig;
+}
+
+export function getDefaultAuthSettings(serviceName = "graph", options = {}) {
   return {
     tenant: DEFAULT_TENANT,
     redirectUri: DEFAULT_REDIRECT_URI,
-    scopes: DEFAULT_SCOPES
+    scopes: getDefaultScopes(serviceName, options)
   };
 }
 
@@ -143,7 +236,7 @@ export function buildAuthorizeUrl({
   clientId,
   tenant = DEFAULT_TENANT,
   redirectUri = DEFAULT_REDIRECT_URI,
-  scopes = DEFAULT_SCOPES,
+  scopes = GRAPH_DEFAULT_SCOPES,
   state,
   codeChallenge
 }) {
@@ -160,9 +253,10 @@ export function buildAuthorizeUrl({
 }
 
 export async function loginWithOAuth(options) {
+  const serviceName = options.serviceName || "graph";
   const tenant = options.tenant || DEFAULT_TENANT;
   const redirectUri = options.redirectUri || DEFAULT_REDIRECT_URI;
-  const scopes = options.scopes || DEFAULT_SCOPES;
+  const scopes = options.scopes || getDefaultScopes(serviceName, options);
   const state = randomState();
   const pkce = createPkcePair();
   const authorizeUrl = buildAuthorizeUrl({
@@ -174,7 +268,7 @@ export async function loginWithOAuth(options) {
     codeChallenge: pkce.challenge
   });
 
-  console.log("Open this URL in your browser and authorize the app:");
+  console.log(`Open this URL in your browser and authorize the ${getServiceLabel(serviceName)} app:`);
   console.log(authorizeUrl);
   console.log("");
   console.log("Waiting for the OAuth callback...");
@@ -190,92 +284,91 @@ export async function loginWithOAuth(options) {
     scope: scopes
   });
 
-  const claims = decodeJwtClaims(token.id_token);
   const config = loadConfig();
-  const nextConfig = {
-    ...config,
-    tenant,
-    redirectUri,
-    scopes,
-    clientId: options.clientId,
-    clientSecret: options.clientSecret || config.clientSecret || null,
-    accessToken: token.access_token,
-    refreshToken: token.refresh_token,
-    idToken: token.id_token || null,
-    tokenType: token.token_type || "Bearer",
-    accessTokenExpiresAt: buildTokenExpiry(token.expires_in),
-    refreshTokenExpiresAt: token.refresh_token_expires_in
-      ? buildTokenExpiry(token.refresh_token_expires_in)
-      : config.refreshTokenExpiresAt || null,
-    user: claims
-      ? {
-          tenantId: claims.tid || null,
-          userId: claims.oid || claims.sub || null,
-          username: claims.preferred_username || claims.upn || null,
-          name: claims.name || null
-        }
-      : config.user || null
-  };
+  const existingServiceConfig = getServiceConfig(config, serviceName);
+  const nextServiceConfig = buildStoredServiceConfig(
+    serviceName,
+    config,
+    {
+      ...options,
+      tenant,
+      redirectUri,
+      scopes
+    },
+    token,
+    existingServiceConfig
+  );
 
-  saveConfig(nextConfig);
+  saveConfig(setServiceConfig(config, serviceName, nextServiceConfig));
 
-  return {
-    tenant,
-    redirectUri,
-    scopes,
-    user: nextConfig.user
-  };
+  return nextServiceConfig;
 }
 
-export async function refreshAccessToken(config) {
-  if (!config.clientId || !config.refreshToken) {
-    throw new Error("Missing client ID or refresh token. Run `graph-api auth login` again.");
+export async function refreshAccessToken(config, options = {}) {
+  const serviceName = options.serviceName || "graph";
+  const serviceConfig = getServiceConfig(config, serviceName);
+
+  if (!serviceConfig.clientId || !serviceConfig.refreshToken) {
+    throw new Error(
+      `Missing client ID or refresh token for ${getServiceLabel(serviceName)}. Run \`graph-api ${serviceName === "graph" ? "auth" : "power-automate auth"} login\` again.`
+    );
   }
 
-  const token = await tokenRequest(config.tenant || DEFAULT_TENANT, {
+  const token = await tokenRequest(serviceConfig.tenant || DEFAULT_TENANT, {
     grant_type: "refresh_token",
-    client_id: config.clientId,
-    ...(config.clientSecret ? { client_secret: config.clientSecret } : {}),
-    refresh_token: config.refreshToken,
-    scope: config.scopes || DEFAULT_SCOPES
+    client_id: serviceConfig.clientId,
+    ...(serviceConfig.clientSecret ? { client_secret: serviceConfig.clientSecret } : {}),
+    refresh_token: serviceConfig.refreshToken,
+    scope: serviceConfig.scopes || getDefaultScopes(serviceName, serviceConfig)
   });
 
-  const claims = decodeJwtClaims(token.id_token || config.idToken);
-  const nextConfig = {
-    ...config,
-    accessToken: token.access_token,
-    refreshToken: token.refresh_token || config.refreshToken,
-    idToken: token.id_token || config.idToken || null,
-    tokenType: token.token_type || config.tokenType || "Bearer",
-    accessTokenExpiresAt: buildTokenExpiry(token.expires_in),
-    refreshTokenExpiresAt: token.refresh_token_expires_in
-      ? buildTokenExpiry(token.refresh_token_expires_in)
-      : config.refreshTokenExpiresAt || null,
-    user: claims
-      ? {
-          tenantId: claims.tid || null,
-          userId: claims.oid || claims.sub || null,
-          username: claims.preferred_username || claims.upn || null,
-          name: claims.name || null
-        }
-      : config.user || null
-  };
+  const nextServiceConfig = buildStoredServiceConfig(
+    serviceName,
+    config,
+    {
+      ...serviceConfig,
+      ...options
+    },
+    token,
+    serviceConfig
+  );
 
-  saveConfig(nextConfig);
-  return nextConfig;
+  saveConfig(setServiceConfig(config, serviceName, nextServiceConfig));
+  return nextServiceConfig;
 }
 
-export async function ensureValidAccessToken(config) {
-  if (!config.accessToken) {
-    throw new Error("No Microsoft Graph access token found. Run `graph-api auth login` first.");
+export async function ensureValidAccessToken(config, options = {}) {
+  const serviceName = options.serviceName || "graph";
+  const serviceConfig = getServiceConfig(config, serviceName);
+
+  if (!serviceConfig.accessToken) {
+    throw new Error(
+      `No ${getServiceLabel(serviceName)} access token found. Run \`graph-api ${serviceName === "graph" ? "auth" : "power-automate auth"} login\` first.`
+    );
   }
 
-  const expiresAt = config.accessTokenExpiresAt ? new Date(config.accessTokenExpiresAt).getTime() : 0;
+  const expiresAt = serviceConfig.accessTokenExpiresAt
+    ? new Date(serviceConfig.accessTokenExpiresAt).getTime()
+    : 0;
   const threshold = Date.now() + 60000;
 
   if (!expiresAt || expiresAt <= threshold) {
-    return await refreshAccessToken(config);
+    return await refreshAccessToken(config, options);
   }
 
-  return config;
+  return serviceConfig;
 }
+
+export function logoutService(serviceName) {
+  const config = loadConfig();
+  const nextConfig = clearServiceConfig(config, serviceName);
+
+  if (Object.keys(nextConfig).length === 0) {
+    deleteConfig();
+    return;
+  }
+
+  saveConfig(nextConfig);
+}
+
+export { buildDataverseApiBaseUrl, normalizeEnvironmentUrl };

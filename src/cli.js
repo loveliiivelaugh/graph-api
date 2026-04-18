@@ -2,37 +2,43 @@ import { parseArgs, normalizeList, requireFlag } from "./args.js";
 import {
   getDefaultAuthSettings,
   loginWithOAuth,
+  logoutService,
   refreshAccessToken
 } from "./auth.js";
-import {
-  deleteConfig,
-  getConfigPath,
-  loadConfig,
-  maskToken,
-  resolveSetting
-} from "./config.js";
+import { getConfigPath, loadConfig, maskToken, resolveSetting, getServiceConfig } from "./config.js";
 import {
   getMe,
   getMyDriveRoot,
   getUser,
   graphRequest,
   listMyMessages,
-  loadJsonInput
+  loadJsonInput as loadGraphJsonInput
 } from "./graph-api.js";
+import {
+  createFlow,
+  deleteFlow,
+  getFlow,
+  listFlows,
+  loadJsonInput as loadPowerAutomateJsonInput,
+  powerAutomateRequest,
+  resolvePowerAutomateSettings,
+  setFlowState,
+  updateFlow
+} from "./power-automate.js";
 
 function printJson(value) {
   console.log(JSON.stringify(value, null, 2));
 }
 
 function printHelp() {
-  const defaults = getDefaultAuthSettings();
+  const graphDefaults = getDefaultAuthSettings("graph");
 
   console.log(`
 graph-api
 
 Usage:
   graph-api help
-  graph-api auth login [--client-id <id>] [--client-secret <secret>] [--tenant common|organizations|consumers|<tenant-id>] [--redirect-uri ${defaults.redirectUri}] [--scopes "${defaults.scopes}"]
+  graph-api auth login [--client-id <id>] [--client-secret <secret>] [--tenant common|organizations|consumers|<tenant-id>] [--redirect-uri ${graphDefaults.redirectUri}] [--scopes "${graphDefaults.scopes}"]
   graph-api auth status
   graph-api auth refresh
   graph-api auth logout
@@ -41,58 +47,123 @@ Usage:
   graph-api me messages [--limit 10]
   graph-api users get --id <user-id-or-upn>
   graph-api request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input file.json]
+  graph-api power-automate auth login --environment-url <url> [--client-id <id>] [--client-secret <secret>] [--tenant <tenant>] [--redirect-uri ${graphDefaults.redirectUri}] [--scopes "<space-delimited scopes>"]
+  graph-api power-automate auth status
+  graph-api power-automate auth refresh
+  graph-api power-automate auth logout
+  graph-api power-automate flows list [--top 10] [--state on|off|suspended|all]
+  graph-api power-automate flows get --id <workflow-id>
+  graph-api power-automate flows create [--data-json '{"name":"..."}' | --input flow.json]
+  graph-api power-automate flows update --id <workflow-id> [--data-json '{"description":"..."}' | --input patch.json]
+  graph-api power-automate flows delete --id <workflow-id>
+  graph-api power-automate flows on --id <workflow-id>
+  graph-api power-automate flows off --id <workflow-id>
+  graph-api power-automate request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input body.json]
 
 Examples:
   graph-api auth login --client-id <app-client-id>
   graph-api me
-  graph-api me drive
-  graph-api me messages --limit 5
-  graph-api users get --id user@contoso.com
   graph-api request GET /me
-  graph-api request GET /me/events --query '$top=5'
+  graph-api power-automate auth login --client-id <app-client-id> --environment-url https://contoso.crm.dynamics.com
+  graph-api power-automate flows list --state on
+  graph-api power-automate request GET /workflows --query '$top=5'
 
 Notes:
-  - register the app in Microsoft Entra ID first and add a desktop/mobile redirect URI
-  - for a system-browser desktop flow, Microsoft recommends http://localhost style redirects
-  - if your app registration is configured as a web/confidential client, pass --client-secret or set GRAPH_CLIENT_SECRET
-  - the CLI stores tokens at ~/.config/graph-api-cli/config.json and refreshes access tokens automatically
-  - default scopes are delegated scopes for a signed-in user flow; add more as needed on login
+  - Power Automate flow management uses the Dataverse Web API, not the unsupported api.flow.microsoft.com endpoint
+  - Power Automate commands currently target solution-aware cloud flows stored in Dataverse (the same scope covered by Microsoft Learn's "Work with cloud flows using code" article)
+  - pass your Dataverse environment URL as --environment-url, for example https://contoso.crm.dynamics.com
+  - default Power Automate login scopes are computed from the environment URL and request <environment-url>/user_impersonation
+  - the CLI stores service tokens at ~/.config/graph-api-cli/config.json and keeps Graph and Power Automate credentials separately
 `.trim());
 }
 
-async function handleAuth(subcommand, flags) {
-  const defaults = getDefaultAuthSettings();
+function getCommandPrefix(serviceName) {
+  return serviceName === "graph" ? "auth" : "power-automate auth";
+}
+
+function resolveAuthEnv(serviceName, key) {
+  const powerAutomateEnv = {
+    clientId: process.env.POWER_AUTOMATE_CLIENT_ID,
+    clientSecret: process.env.POWER_AUTOMATE_CLIENT_SECRET,
+    tenant: process.env.POWER_AUTOMATE_TENANT,
+    redirectUri: process.env.POWER_AUTOMATE_REDIRECT_URI,
+    scopes: process.env.POWER_AUTOMATE_SCOPES
+  };
+  const graphEnv = {
+    clientId: process.env.GRAPH_CLIENT_ID,
+    clientSecret: process.env.GRAPH_CLIENT_SECRET,
+    tenant: process.env.GRAPH_TENANT,
+    redirectUri: process.env.GRAPH_REDIRECT_URI,
+    scopes: process.env.GRAPH_SCOPES
+  };
+
+  if (serviceName === "powerAutomate") {
+    if (key === "scopes") {
+      return powerAutomateEnv[key] || null;
+    }
+
+    return powerAutomateEnv[key] || graphEnv[key] || null;
+  }
+
+  return graphEnv[key] || null;
+}
+
+async function handleAuth(serviceName, subcommand, flags) {
   const config = loadConfig();
+  const serviceConfig = getServiceConfig(config, serviceName);
 
   if (subcommand === "login") {
-    const clientId = resolveSetting(flags["client-id"], process.env.GRAPH_CLIENT_ID, config.clientId);
+    const clientId = resolveSetting(
+      flags["client-id"],
+      resolveAuthEnv(serviceName, "clientId"),
+      serviceConfig.clientId
+    );
 
     if (!clientId) {
       throw new Error("Provide --client-id or set GRAPH_CLIENT_ID.");
     }
 
+    const powerAutomateSettings =
+      serviceName === "powerAutomate" ? resolvePowerAutomateSettings(flags, config) : {};
+    const defaults = getDefaultAuthSettings(serviceName, powerAutomateSettings);
+
     const result = await loginWithOAuth({
+      serviceName,
       clientId,
       clientSecret: resolveSetting(
         flags["client-secret"],
-        process.env.GRAPH_CLIENT_SECRET,
-        config.clientSecret
+        resolveAuthEnv(serviceName, "clientSecret"),
+        serviceConfig.clientSecret
       ),
-      tenant: resolveSetting(flags.tenant, process.env.GRAPH_TENANT, config.tenant, defaults.tenant),
+      tenant: resolveSetting(
+        flags.tenant,
+        resolveAuthEnv(serviceName, "tenant"),
+        serviceConfig.tenant,
+        defaults.tenant
+      ),
       redirectUri: resolveSetting(
         flags["redirect-uri"],
-        process.env.GRAPH_REDIRECT_URI,
-        config.redirectUri,
+        resolveAuthEnv(serviceName, "redirectUri"),
+        serviceConfig.redirectUri,
         defaults.redirectUri
       ),
-      scopes: resolveSetting(flags.scopes, process.env.GRAPH_SCOPES, config.scopes, defaults.scopes)
+      scopes: resolveSetting(
+        flags.scopes,
+        resolveAuthEnv(serviceName, "scopes"),
+        serviceConfig.scopes,
+        defaults.scopes
+      ),
+      ...powerAutomateSettings
     });
 
     console.log("Authenticated successfully.");
     printJson({
+      service: serviceName,
       tenant: result.tenant,
       redirectUri: result.redirectUri,
       scopes: result.scopes,
+      environmentUrl: result.environmentUrl || null,
+      apiBaseUrl: result.apiBaseUrl || null,
       user: result.user,
       configPath: getConfigPath()
     });
@@ -100,33 +171,43 @@ async function handleAuth(subcommand, flags) {
   }
 
   if (subcommand === "status") {
-    if (!config.accessToken) {
-      console.log("No Microsoft Graph auth is configured.");
+    if (!serviceConfig.accessToken) {
+      console.log(
+        serviceName === "graph"
+          ? "No Microsoft Graph auth is configured."
+          : "No Power Automate auth is configured."
+      );
       return;
     }
 
     printJson({
       authenticated: true,
-      tenant: config.tenant,
-      clientId: config.clientId,
-      clientSecretConfigured: Boolean(config.clientSecret),
-      redirectUri: config.redirectUri,
-      scopes: config.scopes,
-      accessToken: maskToken(config.accessToken),
-      refreshToken: maskToken(config.refreshToken),
-      accessTokenExpiresAt: config.accessTokenExpiresAt || null,
-      refreshTokenExpiresAt: config.refreshTokenExpiresAt || null,
-      user: config.user || null,
+      service: serviceName,
+      tenant: serviceConfig.tenant,
+      clientId: serviceConfig.clientId,
+      clientSecretConfigured: Boolean(serviceConfig.clientSecret),
+      redirectUri: serviceConfig.redirectUri,
+      scopes: serviceConfig.scopes,
+      environmentUrl: serviceConfig.environmentUrl || null,
+      apiBaseUrl: serviceConfig.apiBaseUrl || null,
+      accessToken: maskToken(serviceConfig.accessToken),
+      refreshToken: maskToken(serviceConfig.refreshToken),
+      accessTokenExpiresAt: serviceConfig.accessTokenExpiresAt || null,
+      refreshTokenExpiresAt: serviceConfig.refreshTokenExpiresAt || null,
+      user: serviceConfig.user || null,
       configPath: getConfigPath()
     });
     return;
   }
 
   if (subcommand === "refresh") {
-    const refreshed = await refreshAccessToken(config);
+    const refreshed = await refreshAccessToken(config, { serviceName });
     printJson({
+      service: serviceName,
       tenant: refreshed.tenant,
       scopes: refreshed.scopes,
+      environmentUrl: refreshed.environmentUrl || null,
+      apiBaseUrl: refreshed.apiBaseUrl || null,
       accessTokenExpiresAt: refreshed.accessTokenExpiresAt,
       refreshTokenExpiresAt: refreshed.refreshTokenExpiresAt,
       user: refreshed.user || null
@@ -135,12 +216,12 @@ async function handleAuth(subcommand, flags) {
   }
 
   if (subcommand === "logout") {
-    deleteConfig();
-    console.log("Deleted local Graph API CLI config.");
+    logoutService(serviceName);
+    console.log(`Deleted local ${serviceName === "graph" ? "Microsoft Graph" : "Power Automate"} auth from ${getConfigPath()}.`);
     return;
   }
 
-  throw new Error(`Unknown auth command "${subcommand}"`);
+  throw new Error(`Unknown ${getCommandPrefix(serviceName)} command "${subcommand}"`);
 }
 
 async function handleMe(args, flags) {
@@ -188,10 +269,113 @@ async function handleRequest(args, flags) {
     method,
     pathname,
     query: normalizeList(flags.query),
-    body: loadJsonInput(flags)
+    body: loadGraphJsonInput(flags)
   });
 
   printJson(result);
+}
+
+async function handlePowerAutomateFlows(args, flags) {
+  const subcommand = args[0];
+
+  if (subcommand === "list") {
+    printJson(
+      await listFlows({
+        top: flags.top || 10,
+        state: flags.state || "all",
+        query: normalizeList(flags.query)
+      })
+    );
+    return;
+  }
+
+  if (subcommand === "get") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(await getFlow(id, normalizeList(flags.query)));
+    return;
+  }
+
+  if (subcommand === "create") {
+    const body = loadPowerAutomateJsonInput(flags);
+
+    if (body === undefined) {
+      throw new Error("Provide --data-json or --input with the workflow payload.");
+    }
+
+    printJson(await createFlow(body));
+    return;
+  }
+
+  if (subcommand === "update") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    const body = loadPowerAutomateJsonInput(flags);
+
+    if (body === undefined) {
+      throw new Error("Provide --data-json or --input with the update payload.");
+    }
+
+    printJson(await updateFlow(id, body));
+    return;
+  }
+
+  if (subcommand === "delete") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(await deleteFlow(id));
+    return;
+  }
+
+  if (subcommand === "on") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(await setFlowState(id, 1));
+    return;
+  }
+
+  if (subcommand === "off") {
+    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
+    printJson(await setFlowState(id, 0));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate flows command "${subcommand}"`);
+}
+
+async function handlePowerAutomateRequest(args, flags) {
+  const method = args[0];
+  const pathname = args[1];
+
+  if (!method || !pathname) {
+    throw new Error("Usage: graph-api power-automate request <method> <path>");
+  }
+
+  printJson(
+    await powerAutomateRequest({
+      method,
+      pathname,
+      query: normalizeList(flags.query),
+      body: loadPowerAutomateJsonInput(flags)
+    })
+  );
+}
+
+async function handlePowerAutomate(args, flags) {
+  const subcommand = args[0];
+
+  if (subcommand === "auth") {
+    await handleAuth("powerAutomate", args[1], flags);
+    return;
+  }
+
+  if (subcommand === "flows") {
+    await handlePowerAutomateFlows(args.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "request") {
+    await handlePowerAutomateRequest(args.slice(1), flags);
+    return;
+  }
+
+  throw new Error(`Unknown power-automate command "${subcommand}"`);
 }
 
 export async function runCli(argv) {
@@ -205,7 +389,7 @@ export async function runCli(argv) {
 
   try {
     if (command === "auth") {
-      await handleAuth(positionals[1], flags);
+      await handleAuth("graph", positionals[1], flags);
       return;
     }
 
@@ -224,9 +408,14 @@ export async function runCli(argv) {
       return;
     }
 
+    if (command === "power-automate") {
+      await handlePowerAutomate(positionals.slice(1), flags);
+      return;
+    }
+
     throw new Error(`Unknown command "${command}"`);
   } catch (error) {
-    console.error(`Error: ${error.message}`);
+    console.error(error.message);
     process.exitCode = 1;
   }
 }

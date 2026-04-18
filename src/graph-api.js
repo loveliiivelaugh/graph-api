@@ -47,7 +47,7 @@ function parseJson(raw, label) {
 }
 
 export async function graphRequest({ method = "GET", pathname, query = [], body }) {
-  const config = await ensureValidAccessToken(loadConfig());
+  const config = await ensureValidAccessToken(loadConfig(), { serviceName: "graph" });
   const url = new URL(ensureGraphPath(pathname));
 
   for (const item of query) {
