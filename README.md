@@ -7,6 +7,11 @@ This project now supports two Microsoft API surfaces:
 - Microsoft Graph delegated-user auth and requests
 - Power Automate cloud-flow management through Dataverse Web API endpoints
 
+It now also supports two OAuth UX modes:
+
+- local localhost callback login for terminal/browser use
+- hosted auth-session login for chat, mobile, and remote-device sign-in flows
+
 ## Official docs used
 
 - [Microsoft Graph auth concepts](https://learn.microsoft.com/en-us/graph/auth/auth-concepts)
@@ -27,9 +32,15 @@ This project now supports two Microsoft API surfaces:
 http://localhost:8787/callback
 ```
 
-4. Copy the app's `Application (client) ID`.
-5. Add delegated Microsoft Graph permissions that match what you want to do.
-6. For Power Automate, identify your Dataverse environment URL from `Power Apps -> Settings -> Developer resources`.
+4. For hosted/chat login, also add your public HTTPS callback URI, for example:
+
+```text
+https://your-bot-host.example.com/hooks/graph/callback
+```
+
+5. Copy the app's `Application (client) ID`.
+6. Add delegated Microsoft Graph permissions that match what you want to do.
+7. For Power Automate, identify your Dataverse environment URL from `Power Apps -> Settings -> Developer resources`.
 
 Example Dataverse environment URL:
 
@@ -68,6 +79,8 @@ That exposes the `graph-api` command in your shell.
 
 ## Authenticate With Microsoft Graph
 
+### Localhost browser flow
+
 ```bash
 export GRAPH_CLIENT_ID=...
 export GRAPH_CLIENT_SECRET=...
@@ -78,9 +91,41 @@ export GRAPH_SCOPES="openid profile offline_access User.Read Files.Read Mail.Rea
 graph-api auth login
 ```
 
+### Hosted chat/mobile flow
+
+```bash
+export GRAPH_CLIENT_ID=...
+export GRAPH_CLIENT_SECRET=...
+export GRAPH_TENANT=common
+export GRAPH_REDIRECT_URI=https://your-bot-host.example.com/hooks/graph/callback
+export GRAPH_SCOPES="openid profile offline_access User.Read Files.Read Mail.Read"
+
+graph-api auth login start --format json
+```
+
+That returns:
+
+- an auth `sessionId`
+- an `authorizeUrl`
+- a Teams-ready Adaptive Card payload with an `Action.OpenUrl` button
+
+Your chat or web layer should send that button to the user. When Microsoft redirects back to your callback URL, pass the returned `state` and `code` back into:
+
+```bash
+graph-api auth login complete --session-id <sessionId> --state <state> --code <code>
+```
+
+You can also poll status while waiting:
+
+```bash
+graph-api auth login status --session-id <sessionId>
+```
+
 ## Authenticate With Power Automate
 
 You can reuse the same Entra app/client ID. Power Automate auth is stored separately from Graph auth in the same config file.
+
+### Localhost browser flow
 
 ```bash
 export POWER_AUTOMATE_CLIENT_ID=...
@@ -91,6 +136,17 @@ export POWER_AUTOMATE_ENVIRONMENT_URL=https://contoso.crm.dynamics.com
 graph-api power-automate auth login
 ```
 
+### Hosted chat/mobile flow
+
+```bash
+export POWER_AUTOMATE_CLIENT_ID=...
+export POWER_AUTOMATE_TENANT=common
+export POWER_AUTOMATE_REDIRECT_URI=https://your-bot-host.example.com/hooks/graph/callback
+export POWER_AUTOMATE_ENVIRONMENT_URL=https://contoso.crm.dynamics.com
+
+graph-api power-automate auth login start --format json
+```
+
 You can also pass the environment URL directly:
 
 ```bash
@@ -99,10 +155,18 @@ graph-api power-automate auth login \
   --environment-url https://contoso.crm.dynamics.com
 ```
 
+## State and config storage
+
 Config is stored at:
 
 ```text
 ~/.config/graph-api-cli/config.json
+```
+
+Hosted auth sessions are stored at:
+
+```text
+~/.config/graph-api-cli/auth-sessions/
 ```
 
 ## Commands
@@ -113,6 +177,9 @@ Config is stored at:
 graph-api help
 graph-api auth login --client-id <id>
 graph-api auth login --client-id <id> --client-secret <secret>
+graph-api auth login start --client-id <id> --redirect-uri https://your.host/callback --format json
+graph-api auth login complete --session-id <id> --state <state> --code <code>
+graph-api auth login status --session-id <id>
 graph-api auth status
 graph-api auth refresh
 graph-api auth logout
@@ -130,6 +197,9 @@ graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./n
 
 ```bash
 graph-api power-automate auth login --client-id <id> --environment-url https://contoso.crm.dynamics.com
+graph-api power-automate auth login start --client-id <id> --redirect-uri https://your.host/callback --environment-url https://contoso.crm.dynamics.com --format json
+graph-api power-automate auth login complete --session-id <id> --state <state> --code <code>
+graph-api power-automate auth login status --session-id <id>
 graph-api power-automate auth status
 graph-api power-automate auth refresh
 graph-api power-automate auth logout
@@ -180,6 +250,27 @@ graph-api power-automate flows off --id <workflow-id>
 graph-api power-automate request GET /workflows --query '$top=5'
 ```
 
+## Hosted auth flow integration notes
+
+This repo now supports a clean split between:
+
+1. `graph-api ... auth login start`
+   - starts a server-side auth session
+   - returns the login URL and Teams Adaptive Card payload
+2. your bot or web server
+   - sends the button to the user
+   - receives the public callback from Microsoft
+3. `graph-api ... auth login complete`
+   - exchanges the code for tokens
+   - stores the resulting credential set
+
+That makes it usable from:
+
+- Teams mobile chat
+- other chat surfaces
+- remote VPS installs
+- headless or SSH-hosted environments
+
 ## Power Automate Notes
 
 - The supported API surface here is Dataverse Web API flow management, matching Microsoft Learn's `Work with cloud flows using code` guidance.
@@ -218,167 +309,8 @@ Confirm Graph auth and inspect the signed-in user:
 graph-api me
 ```
 
-List active Power Automate cloud flows:
+Inspect the signed-in user's drive root:
 
 ```bash
-graph-api power-automate flows list --state on
+graph-api me drive
 ```
-
-List environments and select a default one:
-
-```bash
-graph-api power-automate environments list
-graph-api power-automate environments select --id Default-123456
-```
-
-Inspect the current Power Automate principal and capability surface:
-
-```bash
-graph-api power-automate whoami
-graph-api power-automate capability-report
-```
-
-Inspect available connections and connection references:
-
-```bash
-graph-api power-automate connections list
-graph-api power-automate connection-references list
-```
-
-Inspect and instantiate starter templates:
-
-```bash
-graph-api power-automate templates list
-graph-api power-automate templates show --id scheduled-basic
-graph-api power-automate templates instantiate \
-  --id scheduled-basic \
-  --params-json '{"name":"Daily digest","schedule":"0 9 * * *"}'
-```
-
-Plan and scaffold a flow from natural language intent:
-
-```bash
-graph-api power-automate plan \
-  "When I get an email from a VIP sender, summarize it, post it to Teams, and create a Planner task if urgent"
-
-graph-api power-automate questions \
-  --intent "When I get an email from a VIP sender, summarize it, post it to Teams, and create a Planner task if urgent"
-
-graph-api power-automate scaffold \
-  --intent-json '{"intent":"When I get an email from a VIP sender, summarize it, post it to Teams, and create a Planner task if urgent","draftTemplate":"teams-alert"}'
-```
-
-Bind a connection reference to a concrete connection:
-
-```bash
-graph-api power-automate connection-references bind \
-  --id 00000000-0000-0000-0000-000000000000 \
-  --connection-id /providers/Microsoft.PowerApps/apis/shared_office365/connections/shared-office365-123
-```
-
-Validate a flow payload before applying it:
-
-```bash
-graph-api power-automate validate --input ./flow-create.json
-graph-api power-automate preflight --input ./flow-create.json --environment Default-123456
-```
-
-Inspect solutions and list the flows inside a solution:
-
-```bash
-graph-api power-automate solutions list
-graph-api power-automate solutions flows list --solution-id 00000000-0000-0000-0000-000000000000
-```
-
-Attach a flow to an unmanaged solution:
-
-```bash
-graph-api power-automate solutions add-flow \
-  --solution-id 00000000-0000-0000-0000-000000000000 \
-  --flow-id 11111111-1111-1111-1111-111111111111
-```
-
-Export, diff, and safely import a flow payload:
-
-```bash
-graph-api power-automate flows export \
-  --id 00000000-0000-0000-0000-000000000000 \
-  --output ./flow.json
-
-graph-api power-automate flows diff \
-  --id 00000000-0000-0000-0000-000000000000 \
-  --input ./flow.json
-
-graph-api power-automate flows import --input ./flow.json
-graph-api power-automate flows import --input ./flow.json --apply
-```
-
-Generate high-level flow drafts from ergonomic flags:
-
-```bash
-graph-api power-automate flows create-scheduled \
-  --name "Daily digest" \
-  --schedule "0 9 * * *"
-
-graph-api power-automate flows create-teams-alert \
-  --name "Ops alert" \
-  --channel <channel-id>
-
-graph-api power-automate flows create-approval \
-  --name "Review request" \
-  --approver approver@contoso.com
-```
-
-Inspect a flow's triggers, actions, and connector dependencies:
-
-```bash
-graph-api power-automate flows triggers list \
-  --id 00000000-0000-0000-0000-000000000000
-
-graph-api power-automate flows actions list \
-  --id 00000000-0000-0000-0000-000000000000
-
-graph-api power-automate flows dependencies \
-  --id 00000000-0000-0000-0000-000000000000
-```
-
-Inspect recent runs for a solution-aware cloud flow:
-
-```bash
-graph-api power-automate runs list --flow-id 00000000-0000-0000-0000-000000000000 --top 10
-```
-
-Diagnose whether a flow has missing or unbound connection references:
-
-```bash
-graph-api power-automate flows doctor --id 00000000-0000-0000-0000-000000000000
-```
-
-Fetch a specific cloud flow:
-
-```bash
-graph-api power-automate flows get --id 00000000-0000-0000-0000-000000000000
-```
-
-Run a raw Dataverse Web API request against workflows:
-
-```bash
-graph-api power-automate request GET /workflows --query '$select=name,workflowid,statecode' --query '$top=5'
-```
-
-Upload a markdown file into OneDrive:
-
-```bash
-graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./notes.md
-```
-
-## Notes
-
-- Preferred setup: register the redirect URI under `Mobile and desktop applications` so Entra treats this as a public client and no client secret is needed.
-- If the redirect URI is registered under `Web`, Entra treats the token exchange as confidential-client auth and you must provide a client secret.
-- The CLI supports both modes.
-- Access tokens expire quickly; the CLI refreshes access tokens automatically when a refresh token is available.
-- Refresh-token lifetime and tenant policies can still force you to re-run login.
-- Some Graph permissions and Dataverse permissions require admin consent.
-- Graph requests target `https://graph.microsoft.com/v1.0` unless you pass a full URL.
-- Power Automate requests target `<environment-url>/api/data/v9.2` unless you pass a full URL.

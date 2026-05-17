@@ -1,6 +1,9 @@
 import { parseArgs, normalizeList, requireFlag } from "./args.js";
 import {
+  completeHostedAuthSession,
+  createHostedAuthSession,
   getDefaultAuthSettings,
+  getHostedAuthSessionStatus,
   loginWithOAuth,
   logoutService,
   refreshAccessToken
@@ -81,6 +84,9 @@ graph-api
 Usage:
   graph-api help
   graph-api auth login [--client-id <id>] [--client-secret <secret>] [--tenant common|organizations|consumers|<tenant-id>] [--redirect-uri ${graphDefaults.redirectUri}] [--scopes "${graphDefaults.scopes}"]
+  graph-api auth login start [--client-id <id>] [--client-secret <secret>] [--tenant common|organizations|consumers|<tenant-id>] [--redirect-uri https://your.host/callback] [--scopes "${graphDefaults.scopes}"] [--format json|text]
+  graph-api auth login complete --session-id <id> --state <state> --code <code>
+  graph-api auth login status --session-id <id>
   graph-api auth status
   graph-api auth refresh
   graph-api auth logout
@@ -90,6 +96,9 @@ Usage:
   graph-api users get --id <user-id-or-upn>
   graph-api request <method> <path> [--query key=value]... [--data-json '{"key":"value"}' | --input file.json | --input-raw file]
   graph-api power-automate auth login --environment-url <url> [--client-id <id>] [--client-secret <secret>] [--tenant <tenant>] [--redirect-uri ${graphDefaults.redirectUri}] [--scopes "<space-delimited scopes>"]
+  graph-api power-automate auth login start --environment-url <url> [--client-id <id>] [--redirect-uri https://your.host/callback]
+  graph-api power-automate auth login complete --session-id <id> --state <state> --code <code>
+  graph-api power-automate auth login status --session-id <id>
   graph-api power-automate auth status
   graph-api power-automate auth refresh
   graph-api power-automate auth logout
@@ -139,6 +148,8 @@ Usage:
 
 Examples:
   graph-api auth login --client-id <app-client-id>
+  graph-api auth login start --client-id <app-client-id> --redirect-uri https://bot.example.com/hooks/graph/callback --format json
+  graph-api auth login complete --session-id <session-id> --state <state> --code <code>
   graph-api me
   graph-api request GET /me
   graph-api request PUT /me/drive/root:/OpenClaw/notes.md:/content --input-raw ./notes.md
@@ -180,6 +191,7 @@ Notes:
   - pass your Dataverse environment URL as --environment-url, for example https://contoso.crm.dynamics.com
   - default Power Automate login scopes are computed from the environment URL and request <environment-url>/user_impersonation
   - the CLI stores service tokens at ~/.config/graph-api-cli/config.json and keeps Graph and Power Automate credentials separately
+  - hosted auth sessions are stored under ~/.config/graph-api-cli/auth-sessions and are designed for chat or remote-device sign-in flows
 `.trim());
 }
 
@@ -214,11 +226,12 @@ function resolveAuthEnv(serviceName, key) {
   return graphEnv[key] || null;
 }
 
-async function handleAuth(serviceName, subcommand, flags) {
+async function handleAuth(serviceName, subcommand, flags, positionals = []) {
   const config = loadConfig();
   const serviceConfig = getServiceConfig(config, serviceName);
 
   if (subcommand === "login") {
+    const nested = positionals[0] || null;
     const clientId = resolveSetting(
       flags["client-id"],
       resolveAuthEnv(serviceName, "clientId"),
@@ -232,8 +245,7 @@ async function handleAuth(serviceName, subcommand, flags) {
     const powerAutomateSettings =
       serviceName === "powerAutomate" ? resolvePowerAutomateSettings(flags, config) : {};
     const defaults = getDefaultAuthSettings(serviceName, powerAutomateSettings);
-
-    const result = await loginWithOAuth({
+    const commonOptions = {
       serviceName,
       clientId,
       clientSecret: resolveSetting(
@@ -260,40 +272,63 @@ async function handleAuth(serviceName, subcommand, flags) {
         defaults.scopes
       ),
       ...powerAutomateSettings
-    });
+    };
 
-    console.log("Authenticated successfully.");
-    printJson({
-      service: serviceName,
-      tenant: result.tenant,
-      redirectUri: result.redirectUri,
-      scopes: result.scopes,
-      environmentUrl: result.environmentUrl || null,
-      apiBaseUrl: result.apiBaseUrl || null,
-      user: result.user,
-      configPath: getConfigPath()
-    });
+    if (nested === "start") {
+      const result = createHostedAuthSession(commonOptions);
+      if ((flags.format || "text") === "json") {
+        printJson(result);
+        return;
+      }
+
+      console.log(`Started hosted ${result.label} auth session.`);
+      console.log(`Session ID: ${result.id}`);
+      console.log(`Authorize URL: ${result.authorizeUrl}`);
+      console.log(`Expires at: ${result.expiresAt}`);
+      console.log("Teams Adaptive Card JSON:");
+      printJson(result.teamsCard);
+      return;
+    }
+
+    if (nested === "complete") {
+      const sessionId = requireFlag(flags, "session-id");
+      const state = requireFlag(flags, "state");
+      const code = requireFlag(flags, "code");
+      const result = await completeHostedAuthSession({
+        sessionId,
+        state,
+        code,
+        error: flags.error || null,
+        errorDescription: flags["error-description"] || null
+      });
+      printJson(result);
+      return;
+    }
+
+    if (nested === "status") {
+      const sessionId = requireFlag(flags, "session-id");
+      const status = getHostedAuthSessionStatus(sessionId);
+      if (!status) {
+        throw new Error(`No auth session found for ${sessionId}`);
+      }
+      printJson(status);
+      return;
+    }
+
+    const result = await loginWithOAuth(commonOptions);
+    printJson(result);
     return;
   }
 
   if (subcommand === "status") {
-    if (!serviceConfig.accessToken) {
-      console.log(
-        serviceName === "graph"
-          ? "No Microsoft Graph auth is configured."
-          : "No Power Automate auth is configured."
-      );
-      return;
-    }
-
     printJson({
-      authenticated: true,
+      authenticated: Boolean(serviceConfig.accessToken),
       service: serviceName,
-      tenant: serviceConfig.tenant,
-      clientId: serviceConfig.clientId,
+      tenant: serviceConfig.tenant || null,
+      clientId: serviceConfig.clientId || null,
       clientSecretConfigured: Boolean(serviceConfig.clientSecret),
-      redirectUri: serviceConfig.redirectUri,
-      scopes: serviceConfig.scopes,
+      redirectUri: serviceConfig.redirectUri || null,
+      scopes: serviceConfig.scopes || null,
       environmentUrl: serviceConfig.environmentUrl || null,
       apiBaseUrl: serviceConfig.apiBaseUrl || null,
       accessToken: maskToken(serviceConfig.accessToken),
@@ -307,548 +342,119 @@ async function handleAuth(serviceName, subcommand, flags) {
   }
 
   if (subcommand === "refresh") {
-    const refreshed = await refreshAccessToken(config, { serviceName });
-    printJson({
-      service: serviceName,
-      tenant: refreshed.tenant,
-      scopes: refreshed.scopes,
-      environmentUrl: refreshed.environmentUrl || null,
-      apiBaseUrl: refreshed.apiBaseUrl || null,
-      accessTokenExpiresAt: refreshed.accessTokenExpiresAt,
-      refreshTokenExpiresAt: refreshed.refreshTokenExpiresAt,
-      user: refreshed.user || null
-    });
+    const result = await refreshAccessToken(config, { serviceName });
+    printJson(result);
     return;
   }
 
   if (subcommand === "logout") {
     logoutService(serviceName);
-    console.log(`Deleted local ${serviceName === "graph" ? "Microsoft Graph" : "Power Automate"} auth from ${getConfigPath()}.`);
+    console.log(`Logged out ${serviceName}.`);
     return;
   }
 
-  throw new Error(`Unknown ${getCommandPrefix(serviceName)} command "${subcommand}"`);
+  throw new Error(`Unknown ${getCommandPrefix(serviceName)} subcommand: ${subcommand}`);
 }
 
-async function handleMe(args, flags) {
-  const subcommand = args[0];
-
-  if (!subcommand) {
-    printJson(await getMe());
-    return;
-  }
-
-  if (subcommand === "drive") {
-    printJson(await getMyDriveRoot());
-    return;
-  }
-
-  if (subcommand === "messages") {
-    printJson(await listMyMessages(flags.limit || 10));
-    return;
-  }
-
-  throw new Error(`Unknown me command "${subcommand}"`);
+async function handleGraphMe() {
+  printJson(await getMe(loadConfig()));
 }
 
-async function handleUsers(args, flags) {
-  const subcommand = args[0];
-
-  if (subcommand === "get") {
-    const id = requireFlag(flags, "id", "Provide the user id or UPN with --id");
-    printJson(await getUser(id));
-    return;
-  }
-
-  throw new Error(`Unknown users command "${subcommand}"`);
+async function handleGraphDrive() {
+  printJson(await getMyDriveRoot(loadConfig()));
 }
 
-async function handleRequest(args, flags) {
-  const method = args[0];
-  const pathname = args[1];
+async function handleGraphMessages(flags) {
+  const limit = flags.limit ? Number(flags.limit) : 10;
+  printJson(await listMyMessages(loadConfig(), { top: limit }));
+}
 
-  if (!method || !pathname) {
+async function handleGetUser(flags) {
+  const id = requireFlag(flags, "id");
+  printJson(await getUser(loadConfig(), id));
+}
+
+function parseQueryFlags(flags) {
+  return normalizeList(flags.query).map((entry) => {
+    const [key, ...rest] = entry.split("=");
+    return [key, rest.join("=")];
+  });
+}
+
+async function handleGraphRequest(positionals, flags) {
+  const method = positionals[0];
+  const requestPath = positionals[1];
+
+  if (!method || !requestPath) {
     throw new Error("Usage: graph-api request <method> <path>");
   }
 
-  const requestInput = loadRequestInput(flags);
-  const result = await graphRequest({
-    method,
-    pathname,
-    query: normalizeList(flags.query),
-    ...requestInput
+  const body = await loadRequestInput({
+    dataJson: flags["data-json"],
+    inputPath: flags.input,
+    inputRawPath: flags["input-raw"]
   });
 
-  printJson(result);
-}
-
-async function handlePowerAutomateFlows(args, flags) {
-  const subcommand = args[0];
-  const environment = flags.environment || flags["environment-url"] || null;
-
-  if (subcommand === "list") {
-    printJson(
-      await listFlows({
-        top: flags.top || 10,
-        state: flags.state || "all",
-        query: normalizeList(flags.query),
-        environment
-      })
-    );
-    return;
-  }
-
-  if (subcommand === "get") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await getFlow(id, normalizeList(flags.query), { environment }));
-    return;
-  }
-
-  if (subcommand === "doctor") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await diagnoseFlow(id, { query: normalizeList(flags.query), environment }));
-    return;
-  }
-
-  if (subcommand === "triggers") {
-    const nested = args[1];
-
-    if (nested === "list") {
-      printJson(
-        await listFlowTriggers(requireFlag(flags, "id", "Provide the workflow id with --id"), {
-          query: normalizeList(flags.query),
-          environment
-        })
-      );
-      return;
-    }
-
-    throw new Error(`Unknown power-automate flows triggers command "${nested}"`);
-  }
-
-  if (subcommand === "actions") {
-    const nested = args[1];
-
-    if (nested === "list") {
-      printJson(
-        await listFlowActions(requireFlag(flags, "id", "Provide the workflow id with --id"), {
-          query: normalizeList(flags.query),
-          environment
-        })
-      );
-      return;
-    }
-
-    throw new Error(`Unknown power-automate flows actions command "${nested}"`);
-  }
-
-  if (subcommand === "dependencies") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await listFlowDependencies(id, { query: normalizeList(flags.query), environment }));
-    return;
-  }
-
-  if (subcommand === "export") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(
-      await exportFlow(id, {
-        query: normalizeList(flags.query),
-        environment,
-        output: flags.output || null
-      })
-    );
-    return;
-  }
-
-  if (subcommand === "diff") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    const body = loadPowerAutomateJsonInput(flags);
-
-    if (body === undefined) {
-      throw new Error("Provide --data-json or --input with the workflow payload.");
-    }
-
-    printJson(await diffFlow(id, body, { environment }));
-    return;
-  }
-
-  if (subcommand === "import") {
-    const body = loadPowerAutomateJsonInput(flags);
-
-    if (body === undefined) {
-      throw new Error("Provide --data-json or --input with the workflow payload.");
-    }
-
-    printJson(
-      await importFlow(body, {
-        id: flags.id || null,
-        apply: Boolean(flags.apply),
-        environment
-      })
-    );
-    return;
-  }
-
-  if (subcommand === "create-scheduled") {
-    printJson(
-      await createTemplateBackedFlow(
-        "scheduled-basic",
-        {
-          name: requireFlag(flags, "name", "Provide the flow name with --name"),
-          schedule: requireFlag(flags, "schedule", "Provide the schedule with --schedule"),
-          message: flags.message || null,
-          description: flags.description || null
-        },
-        {
-          apply: Boolean(flags.apply),
-          environment,
-          output: flags.output || null
-        }
-      )
-    );
-    return;
-  }
-
-  if (subcommand === "create-teams-alert") {
-    printJson(
-      await createTemplateBackedFlow(
-        "teams-alert",
-        {
-          name: requireFlag(flags, "name", "Provide the flow name with --name"),
-          channel: requireFlag(flags, "channel", "Provide the Teams channel id with --channel"),
-          summary: flags.summary || null,
-          description: flags.description || null,
-          schedule: flags.schedule || null,
-          teamId: flags["team-id"] || null
-        },
-        {
-          apply: Boolean(flags.apply),
-          environment,
-          output: flags.output || null
-        }
-      )
-    );
-    return;
-  }
-
-  if (subcommand === "create-approval") {
-    printJson(
-      await createTemplateBackedFlow(
-        "approval",
-        {
-          name: requireFlag(flags, "name", "Provide the flow name with --name"),
-          approver: requireFlag(flags, "approver", "Provide the approver with --approver"),
-          title: flags.title || null,
-          details: flags.details || null,
-          description: flags.description || null,
-          schedule: flags.schedule || null
-        },
-        {
-          apply: Boolean(flags.apply),
-          environment,
-          output: flags.output || null
-        }
-      )
-    );
-    return;
-  }
-
-  if (subcommand === "create") {
-    const body = loadPowerAutomateJsonInput(flags);
-
-    if (body === undefined) {
-      throw new Error("Provide --data-json or --input with the workflow payload.");
-    }
-
-    printJson(await createFlow(body, { environment }));
-    return;
-  }
-
-  if (subcommand === "update") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    const body = loadPowerAutomateJsonInput(flags);
-
-    if (body === undefined) {
-      throw new Error("Provide --data-json or --input with the update payload.");
-    }
-
-    printJson(await updateFlow(id, body, { environment }));
-    return;
-  }
-
-  if (subcommand === "delete") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await deleteFlow(id, { environment }));
-    return;
-  }
-
-  if (subcommand === "on") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await setFlowState(id, 1, { environment }));
-    return;
-  }
-
-  if (subcommand === "off") {
-    const id = requireFlag(flags, "id", "Provide the workflow id with --id");
-    printJson(await setFlowState(id, 0, { environment }));
-    return;
-  }
-
-  throw new Error(`Unknown power-automate flows command "${subcommand}"`);
-}
-
-async function handlePowerAutomateRequest(args, flags) {
-  const method = args[0];
-  const pathname = args[1];
-
-  if (!method || !pathname) {
-    throw new Error("Usage: graph-api power-automate request <method> <path>");
-  }
-
+  const queryEntries = parseQueryFlags(flags);
   printJson(
-    await powerAutomateRequest({
+    await graphRequest(loadConfig(), {
       method,
-      pathname,
-      query: normalizeList(flags.query),
-      body: loadPowerAutomateJsonInput(flags),
-      environment: flags.environment || flags["environment-url"] || null
+      path: requestPath,
+      queryEntries,
+      body,
+      headers: body && typeof body !== "string" ? { "content-type": "application/json" } : {}
     })
   );
 }
 
-async function handlePowerAutomateEnvironments(args, flags) {
-  const subcommand = args[0];
-
-  if (subcommand === "list") {
-    printJson(await listEnvironments({ query: normalizeList(flags.query) }));
-    return;
-  }
-
-  if (subcommand === "get") {
-    const id = requireFlag(flags, "id", "Provide the environment id with --id");
-    printJson(await getEnvironment(id, { query: normalizeList(flags.query) }));
-    return;
-  }
-
-  if (subcommand === "resolve") {
-    const url = requireFlag(flags, "url", "Provide the environment URL with --url");
-    const environment = await resolveEnvironmentByUrl(url, { query: normalizeList(flags.query) });
-    printJson({
-      ok: true,
-      service: "power-automate",
-      environmentId: environment.id,
-      environmentUrl: environment.environmentUrl,
-      timestamp: new Date().toISOString(),
-      item: environment
-    });
-    return;
-  }
-
-  if (subcommand === "select") {
-    let environment = null;
-
-    if (flags.id) {
-      environment = await resolveActiveEnvironment(flags.id);
-    } else if (flags.url) {
-      environment = await resolveEnvironmentByUrl(flags.url, { query: normalizeList(flags.query) });
-    } else {
-      throw new Error("Provide --id or --url to choose the default Power Automate environment.");
-    }
-
-    printJson(selectEnvironment(environment));
-    return;
-  }
-
-  throw new Error(`Unknown power-automate environments command "${subcommand}"`);
+function resolveEnvironmentOverride(flags) {
+  return flags.environment || flags["environment-url"] || null;
 }
 
-async function handlePowerAutomateConnections(args, flags) {
-  const subcommand = args[0];
-  const environment = flags.environment || flags["environment-url"] || null;
-
-  if (subcommand === "list") {
-    printJson(await listConnections({ environment, query: normalizeList(flags.query) }));
-    return;
-  }
-
-  if (subcommand === "get") {
-    const id = requireFlag(flags, "id", "Provide the connection id with --id");
-    printJson(await getConnection(id, { environment, query: normalizeList(flags.query) }));
-    return;
-  }
-
-  throw new Error(`Unknown power-automate connections command "${subcommand}"`);
+async function handlePowerAutomateWhoAmI(flags, config) {
+  printJson(await whoAmI(config, { environment: resolveEnvironmentOverride(flags) }));
 }
 
-async function handlePowerAutomateConnectionReferences(args, flags) {
-  const subcommand = args[0];
-  const environment = flags.environment || flags["environment-url"] || null;
-
-  if (subcommand === "list") {
-    printJson(await listConnectionReferences({ environment, query: normalizeList(flags.query) }));
-    return;
-  }
-
-  if (subcommand === "get") {
-    const id = requireFlag(flags, "id", "Provide the connection reference id with --id");
-    printJson(await getConnectionReference(id, { environment, query: normalizeList(flags.query) }));
-    return;
-  }
-
-  if (subcommand === "bind") {
-    const id = requireFlag(flags, "id", "Provide the connection reference id with --id");
-    const connectionId = requireFlag(
-      flags,
-      "connection-id",
-      "Provide the connection id with --connection-id"
-    );
-    printJson(await bindConnectionReference(id, connectionId, { environment }));
-    return;
-  }
-
-  throw new Error(`Unknown power-automate connection-references command "${subcommand}"`);
+async function handlePowerAutomateCapabilityReport(flags, config) {
+  printJson(await capabilityReport(config, { environment: resolveEnvironmentOverride(flags) }));
 }
 
-async function handlePowerAutomateRuns(args, flags) {
-  const subcommand = args[0];
-  const environment = flags.environment || flags["environment-url"] || null;
-
-  if (subcommand === "list") {
-    printJson(
-      await listRuns({
-        flowId: requireFlag(flags, "flow-id", "Provide the workflow id with --flow-id"),
-        top: flags.top || 20,
-        query: normalizeList(flags.query),
-        environment
-      })
-    );
-    return;
-  }
-
-  if (subcommand === "get") {
-    printJson(
-      await getRun(requireFlag(flags, "id", "Provide the run id with --id"), {
-        query: normalizeList(flags.query),
-        environment
-      })
-    );
-    return;
-  }
-
-  throw new Error(`Unknown power-automate runs command "${subcommand}"`);
+async function handlePowerAutomateQuestions(flags) {
+  const intent = requireFlag(flags, "intent");
+  printJson(listIntentQuestions(intent));
 }
 
-async function handlePowerAutomateSolutions(args, flags) {
-  const subcommand = args[0];
-  const environment = flags.environment || flags["environment-url"] || null;
+async function handlePowerAutomatePlan(positionals) {
+  const intent = positionals.join(" ").trim();
 
-  if (subcommand === "list") {
-    printJson(await listSolutions({ environment, query: normalizeList(flags.query) }));
-    return;
+  if (!intent) {
+    throw new Error('Usage: graph-api power-automate plan "<intent>"');
   }
 
-  if (subcommand === "get") {
-    printJson(
-      await getSolution(requireFlag(flags, "id", "Provide the solution id with --id"), {
-        environment,
-        query: normalizeList(flags.query)
-      })
-    );
-    return;
-  }
-
-  if (subcommand === "flows") {
-    const nested = args[1];
-
-    if (nested === "list") {
-      printJson(
-        await listSolutionFlows(
-          requireFlag(flags, "solution-id", "Provide the solution id with --solution-id"),
-          {
-            environment,
-            query: normalizeList(flags.query)
-          }
-        )
-      );
-      return;
-    }
-
-    throw new Error(`Unknown power-automate solutions flows command "${nested}"`);
-  }
-
-  if (subcommand === "add-flow") {
-    printJson(
-      await addFlowToSolution(
-        requireFlag(flags, "solution-id", "Provide the solution id with --solution-id"),
-        requireFlag(flags, "flow-id", "Provide the flow id with --flow-id"),
-        { environment }
-      )
-    );
-    return;
-  }
-
-  throw new Error(`Unknown power-automate solutions command "${subcommand}"`);
+  printJson(planIntent(intent));
 }
 
-async function handlePowerAutomateValidation(subcommand, flags) {
-  const body = loadPowerAutomateJsonInput(flags);
+async function handlePowerAutomateScaffold(flags, config) {
+  const intentJson = requireFlag(flags, "intent-json");
+  const structuredIntent = parseJsonFlag(intentJson, "--intent-json");
+  const environment = resolveEnvironmentOverride(flags);
+  const payload = scaffoldIntent(structuredIntent);
+  const outputPath = flags.output;
 
-  if (body === undefined) {
-    throw new Error("Provide --data-json or --input with the workflow payload.");
+  if (outputPath) {
+    await Bun.write(outputPath, `${JSON.stringify(payload, null, 2)}\n`);
   }
 
-  const environment = flags.environment || flags["environment-url"] || null;
-
-  if (subcommand === "validate") {
-    printJson(await validateFlowPayload(body, { environment }));
+  if (flags.apply) {
+    printJson(await createFlow(config, payload, { environment }));
     return;
   }
 
-  if (subcommand === "preflight") {
-    printJson(await preflightFlowPayload(body, { environment }));
-    return;
-  }
-
-  throw new Error(`Unknown power-automate validation command "${subcommand}"`);
+  printJson({ apply: false, environment, payload, output: outputPath || null });
 }
 
-async function handlePowerAutomateIntent(subcommand, args, flags) {
-  const environment = flags.environment || flags["environment-url"] || null;
-
-  if (subcommand === "plan") {
-    const intent = args.join(" ").trim();
-
-    if (!intent) {
-      throw new Error('Usage: graph-api power-automate plan "<intent>"');
-    }
-
-    printJson(planIntent(intent));
-    return;
-  }
-
-  if (subcommand === "questions") {
-    const intent = requireFlag(flags, "intent", "Provide the intent text with --intent");
-    printJson(listIntentQuestions(intent));
-    return;
-  }
-
-  if (subcommand === "scaffold") {
-    const intentJson = requireFlag(flags, "intent-json", "Provide the intent JSON with --intent-json");
-    printJson(
-      await scaffoldIntent(parseJsonFlag(intentJson, "--intent-json"), {
-        apply: Boolean(flags.apply),
-        output: flags.output || null,
-        environment
-      })
-    );
-    return;
-  }
-
-  throw new Error(`Unknown power-automate intent command "${subcommand}"`);
-}
-
-async function handlePowerAutomateTemplates(args, flags) {
-  const subcommand = args[0];
+async function handlePowerAutomateTemplates(positionals, flags) {
+  const subcommand = positionals[0];
 
   if (subcommand === "list") {
     printJson(listTemplates());
@@ -856,136 +462,477 @@ async function handlePowerAutomateTemplates(args, flags) {
   }
 
   if (subcommand === "show") {
-    printJson(getTemplate(requireFlag(flags, "id", "Provide the template id with --id")));
+    printJson(getTemplate(requireFlag(flags, "id")));
     return;
   }
 
   if (subcommand === "instantiate") {
+    const templateId = requireFlag(flags, "id");
     const params = flags["params-json"] ? parseJsonFlag(flags["params-json"], "--params-json") : {};
+    const payload = instantiateTemplatePayload(templateId, params);
+    if (flags.output) {
+      await Bun.write(flags.output, `${JSON.stringify(payload, null, 2)}\n`);
+    }
+    printJson(payload);
+    return;
+  }
+
+  throw new Error(`Unknown power-automate templates subcommand: ${subcommand}`);
+}
+
+async function handlePowerAutomateEnvironments(positionals, flags, config) {
+  const subcommand = positionals[0];
+
+  if (subcommand === "list") {
+    printJson(await listEnvironments(config));
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(await getEnvironment(config, requireFlag(flags, "id")));
+    return;
+  }
+
+  if (subcommand === "resolve") {
+    printJson(await resolveEnvironmentByUrl(config, requireFlag(flags, "url")));
+    return;
+  }
+
+  if (subcommand === "select") {
+    printJson(selectEnvironment(config, requireFlag(flags, "id")));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate environments subcommand: ${subcommand}`);
+}
+
+async function handlePowerAutomateConnections(positionals, flags, config) {
+  const subcommand = positionals[0];
+  const environment = resolveEnvironmentOverride(flags);
+
+  if (subcommand === "list") {
+    printJson(await listConnections(config, { environment }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(await getConnection(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate connections subcommand: ${subcommand}`);
+}
+
+async function handlePowerAutomateConnectionReferences(positionals, flags, config) {
+  const subcommand = positionals[0];
+  const environment = resolveEnvironmentOverride(flags);
+
+  if (subcommand === "list") {
+    printJson(await listConnectionReferences(config, { environment }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(await getConnectionReference(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "bind") {
     printJson(
-      instantiateTemplatePayload(
-        requireFlag(flags, "id", "Provide the template id with --id"),
-        params,
-        { output: flags.output || null }
-      )
+      await bindConnectionReference(config, {
+        id: requireFlag(flags, "id"),
+        connectionId: requireFlag(flags, "connection-id"),
+        environment
+      })
     );
     return;
   }
 
-  throw new Error(`Unknown power-automate templates command "${subcommand}"`);
+  throw new Error(`Unknown power-automate connection-references subcommand: ${subcommand}`);
 }
 
-async function handlePowerAutomate(args, flags) {
-  const subcommand = args[0];
+async function handlePowerAutomateSolutions(positionals, flags, config) {
+  const subcommand = positionals[0];
+  const environment = resolveEnvironmentOverride(flags);
 
-  if (subcommand === "auth") {
-    await handleAuth("powerAutomate", args[1], flags);
+  if (subcommand === "list") {
+    printJson(await listSolutions(config, { environment }));
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(await getSolution(config, requireFlag(flags, "id"), { environment }));
     return;
   }
 
   if (subcommand === "flows") {
-    await handlePowerAutomateFlows(args.slice(1), flags);
-    return;
+    const nested = positionals[1];
+    if (nested === "list") {
+      printJson(
+        await listSolutionFlows(config, requireFlag(flags, "solution-id"), { environment })
+      );
+      return;
+    }
   }
 
-  if (subcommand === "environments") {
-    await handlePowerAutomateEnvironments(args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "connections") {
-    await handlePowerAutomateConnections(args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "templates") {
-    await handlePowerAutomateTemplates(args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "plan" || subcommand === "questions" || subcommand === "scaffold") {
-    await handlePowerAutomateIntent(subcommand, args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "connection-references") {
-    await handlePowerAutomateConnectionReferences(args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "runs") {
-    await handlePowerAutomateRuns(args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "solutions") {
-    await handlePowerAutomateSolutions(args.slice(1), flags);
-    return;
-  }
-
-  if (subcommand === "validate" || subcommand === "preflight") {
-    await handlePowerAutomateValidation(subcommand, flags);
-    return;
-  }
-
-  if (subcommand === "whoami") {
-    printJson(await whoAmI({ environment: flags.environment || flags["environment-url"] || null }));
-    return;
-  }
-
-  if (subcommand === "capability-report") {
+  if (subcommand === "add-flow") {
     printJson(
-      await capabilityReport({ environment: flags.environment || flags["environment-url"] || null })
+      await addFlowToSolution(config, {
+        solutionId: requireFlag(flags, "solution-id"),
+        flowId: requireFlag(flags, "flow-id"),
+        environment
+      })
     );
     return;
   }
 
-  if (subcommand === "request") {
-    await handlePowerAutomateRequest(args.slice(1), flags);
+  throw new Error(`Unknown power-automate solutions subcommand: ${subcommand}`);
+}
+
+async function handlePowerAutomateRuns(positionals, flags, config) {
+  const subcommand = positionals[0];
+  const environment = resolveEnvironmentOverride(flags);
+
+  if (subcommand === "list") {
+    printJson(
+      await listRuns(config, requireFlag(flags, "flow-id"), {
+        top: flags.top ? Number(flags.top) : 20,
+        environment
+      })
+    );
     return;
   }
 
-  throw new Error(`Unknown power-automate command "${subcommand}"`);
+  if (subcommand === "get") {
+    printJson(await getRun(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate runs subcommand: ${subcommand}`);
+}
+
+async function handlePowerAutomateFlows(positionals, flags, config) {
+  const subcommand = positionals[0];
+  const environment = resolveEnvironmentOverride(flags);
+
+  if (subcommand === "list") {
+    printJson(
+      await listFlows(config, {
+        top: flags.top ? Number(flags.top) : 10,
+        state: flags.state || "all",
+        environment
+      })
+    );
+    return;
+  }
+
+  if (subcommand === "get") {
+    printJson(await getFlow(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "doctor") {
+    printJson(await diagnoseFlow(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "triggers") {
+    printJson(await listFlowTriggers(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "actions") {
+    printJson(await listFlowActions(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "dependencies") {
+    printJson(await listFlowDependencies(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "export") {
+    const payload = await exportFlow(config, requireFlag(flags, "id"), { environment });
+    if (flags.output) {
+      await Bun.write(flags.output, `${JSON.stringify(payload, null, 2)}\n`);
+    }
+    printJson(payload);
+    return;
+  }
+
+  if (subcommand === "import") {
+    const payload = await loadPowerAutomateJsonInput(flags.input);
+    const result = await importFlow(config, payload, {
+      id: flags.id || null,
+      apply: Boolean(flags.apply),
+      environment
+    });
+    printJson(result);
+    return;
+  }
+
+  if (subcommand === "diff") {
+    const payload = await loadPowerAutomateJsonInput(flags.input);
+    printJson(await diffFlow(config, requireFlag(flags, "id"), payload, { environment }));
+    return;
+  }
+
+  if (subcommand === "create-scheduled") {
+    const result = await createTemplateBackedFlow(config, {
+      templateId: "scheduled-basic",
+      params: {
+        name: requireFlag(flags, "name"),
+        schedule: requireFlag(flags, "schedule"),
+        message: flags.message || null
+      },
+      apply: Boolean(flags.apply),
+      output: flags.output || null,
+      environment
+    });
+    printJson(result);
+    return;
+  }
+
+  if (subcommand === "create-teams-alert") {
+    const result = await createTemplateBackedFlow(config, {
+      templateId: "teams-alert",
+      params: {
+        name: requireFlag(flags, "name"),
+        channel: requireFlag(flags, "channel"),
+        summary: flags.summary || null
+      },
+      apply: Boolean(flags.apply),
+      output: flags.output || null,
+      environment
+    });
+    printJson(result);
+    return;
+  }
+
+  if (subcommand === "create-approval") {
+    const result = await createTemplateBackedFlow(config, {
+      templateId: "approval",
+      params: {
+        name: requireFlag(flags, "name"),
+        approver: requireFlag(flags, "approver"),
+        title: flags.title || null,
+        details: flags.details || null
+      },
+      apply: Boolean(flags.apply),
+      output: flags.output || null,
+      environment
+    });
+    printJson(result);
+    return;
+  }
+
+  if (subcommand === "create") {
+    const payload = flags["data-json"]
+      ? parseJsonFlag(flags["data-json"], "--data-json")
+      : await loadPowerAutomateJsonInput(flags.input);
+    printJson(await createFlow(config, payload, { environment }));
+    return;
+  }
+
+  if (subcommand === "update") {
+    const payload = flags["data-json"]
+      ? parseJsonFlag(flags["data-json"], "--data-json")
+      : await loadPowerAutomateJsonInput(flags.input);
+    printJson(await updateFlow(config, requireFlag(flags, "id"), payload, { environment }));
+    return;
+  }
+
+  if (subcommand === "delete") {
+    printJson(await deleteFlow(config, requireFlag(flags, "id"), { environment }));
+    return;
+  }
+
+  if (subcommand === "on") {
+    printJson(await setFlowState(config, requireFlag(flags, "id"), "on", { environment }));
+    return;
+  }
+
+  if (subcommand === "off") {
+    printJson(await setFlowState(config, requireFlag(flags, "id"), "off", { environment }));
+    return;
+  }
+
+  throw new Error(`Unknown power-automate flows subcommand: ${subcommand}`);
+}
+
+async function handlePowerAutomateValidate(flags, config) {
+  const payload = await loadPowerAutomateJsonInput(flags.input);
+  printJson(validateFlowPayload(payload, { environment: resolveEnvironmentOverride(flags), config }));
+}
+
+async function handlePowerAutomatePreflight(flags, config) {
+  const payload = await loadPowerAutomateJsonInput(flags.input);
+  printJson(
+    await preflightFlowPayload(config, payload, { environment: resolveEnvironmentOverride(flags) })
+  );
+}
+
+async function handlePowerAutomateRequest(positionals, flags, config) {
+  const method = positionals[0];
+  const requestPath = positionals[1];
+
+  if (!method || !requestPath) {
+    throw new Error("Usage: graph-api power-automate request <method> <path>");
+  }
+
+  const body = flags["data-json"]
+    ? parseJsonFlag(flags["data-json"], "--data-json")
+    : flags.input
+      ? await loadPowerAutomateJsonInput(flags.input)
+      : null;
+
+  printJson(
+    await powerAutomateRequest(config, {
+      method,
+      path: requestPath,
+      environment: resolveEnvironmentOverride(flags),
+      queryEntries: parseQueryFlags(flags),
+      body
+    })
+  );
+}
+
+async function handlePowerAutomate(positionals, flags) {
+  const config = loadConfig();
+  const subcommand = positionals[0];
+
+  if (!subcommand) {
+    throw new Error("Usage: graph-api power-automate <command>");
+  }
+
+  if (subcommand === "auth") {
+    await handleAuth("powerAutomate", positionals[1], flags, positionals.slice(2));
+    return;
+  }
+
+  if (subcommand === "whoami") {
+    await handlePowerAutomateWhoAmI(flags, config);
+    return;
+  }
+
+  if (subcommand === "capability-report") {
+    await handlePowerAutomateCapabilityReport(flags, config);
+    return;
+  }
+
+  if (subcommand === "plan") {
+    await handlePowerAutomatePlan(positionals.slice(1));
+    return;
+  }
+
+  if (subcommand === "questions") {
+    await handlePowerAutomateQuestions(flags);
+    return;
+  }
+
+  if (subcommand === "scaffold") {
+    await handlePowerAutomateScaffold(flags, config);
+    return;
+  }
+
+  if (subcommand === "templates") {
+    await handlePowerAutomateTemplates(positionals.slice(1), flags);
+    return;
+  }
+
+  if (subcommand === "environments") {
+    await handlePowerAutomateEnvironments(positionals.slice(1), flags, config);
+    return;
+  }
+
+  if (subcommand === "connections") {
+    await handlePowerAutomateConnections(positionals.slice(1), flags, config);
+    return;
+  }
+
+  if (subcommand === "connection-references") {
+    await handlePowerAutomateConnectionReferences(positionals.slice(1), flags, config);
+    return;
+  }
+
+  if (subcommand === "solutions") {
+    await handlePowerAutomateSolutions(positionals.slice(1), flags, config);
+    return;
+  }
+
+  if (subcommand === "runs") {
+    await handlePowerAutomateRuns(positionals.slice(1), flags, config);
+    return;
+  }
+
+  if (subcommand === "flows") {
+    await handlePowerAutomateFlows(positionals.slice(1), flags, config);
+    return;
+  }
+
+  if (subcommand === "validate") {
+    await handlePowerAutomateValidate(flags, config);
+    return;
+  }
+
+  if (subcommand === "preflight") {
+    await handlePowerAutomatePreflight(flags, config);
+    return;
+  }
+
+  if (subcommand === "request") {
+    await handlePowerAutomateRequest(positionals.slice(1), flags, config);
+    return;
+  }
+
+  throw new Error(`Unknown power-automate subcommand: ${subcommand}`);
 }
 
 export async function runCli(argv) {
   const { positionals, flags } = parseArgs(argv);
-  const command = positionals[0];
+  const [command, subcommand, ...rest] = positionals;
 
   if (!command || command === "help" || flags.help) {
     printHelp();
     return;
   }
 
-  try {
-    if (command === "auth") {
-      await handleAuth("graph", positionals[1], flags);
-      return;
-    }
-
-    if (command === "me") {
-      await handleMe(positionals.slice(1), flags);
-      return;
-    }
-
-    if (command === "users") {
-      await handleUsers(positionals.slice(1), flags);
-      return;
-    }
-
-    if (command === "request") {
-      await handleRequest(positionals.slice(1), flags);
-      return;
-    }
-
-    if (command === "power-automate") {
-      await handlePowerAutomate(positionals.slice(1), flags);
-      return;
-    }
-
-    throw new Error(`Unknown command "${command}"`);
-  } catch (error) {
-    console.error(error.message);
-    process.exitCode = 1;
+  if (command === "auth") {
+    await handleAuth("graph", subcommand, flags, rest);
+    return;
   }
+
+  if (command === "me") {
+    if (!subcommand) {
+      await handleGraphMe();
+      return;
+    }
+
+    if (subcommand === "drive") {
+      await handleGraphDrive();
+      return;
+    }
+
+    if (subcommand === "messages") {
+      await handleGraphMessages(flags);
+      return;
+    }
+  }
+
+  if (command === "users" && subcommand === "get") {
+    await handleGetUser(flags);
+    return;
+  }
+
+  if (command === "request") {
+    await handleGraphRequest([subcommand, ...rest], flags);
+    return;
+  }
+
+  if (command === "power-automate") {
+    await handlePowerAutomate([subcommand, ...rest], flags);
+    return;
+  }
+
+  throw new Error(`Unknown command: ${command}`);
 }
